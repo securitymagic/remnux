@@ -1,12 +1,12 @@
-# DuskReader: Comparison of Two Rust Viewer Builds and a Suspected CLOUDHAZE Connection
+# DuskReader and PageForge: Three Rust Viewer Samples and a Suspected CLOUDHAZE / Zenith Connection
 
 **Analysis date:** 2026-10-17  
 **Status:** Research in progress; attribution and full capabilities not confirmed  
-**Scope:** Two Windows PE samples examined with static analysis (Malcat, FLOSS, raw-byte review) and limited Frida dynamic tracing in FLARE-VM.
+**Scope:** Three Windows PE samples: two DuskReader builds (potential precursor and network-capable version) plus PageForge as a known-family comparison. Static analysis used Malcat, FLOSS, PE byte-level inspection, and limited Frida tracing on FLARE-VM. Third-party malware IOC reporting is treated as corroboration, not a substitute for code-level attribution.
 
-> **Assessment:** The samples share DuskReader branding and document-viewer functionality. The `1bd7…` build additionally reconstructs an obfuscated remote hostname and produces `https://updatedrun.com/updater/goal` at runtime. The `b24e…` build is a plausible earlier/prototype or differently configured build without the observed networking component. Their chronological relationship and the absence of malicious logic in `b24e…` are **not proven**. The `1bd7…` implementation is **consistent with**, but not yet definitively attributable to, the QuartzLine/CLOUDHAZE cluster.
+> **Assessment:** The two DuskReader builds share application branding and viewer functionality. The `1bd7…` sample reconstructs the obfuscated host `updatedrun.com` and builds `https://updatedrun.com/updater/goal`; `b24e…` may be an earlier/test build, but chronology and absence of malicious code are unproven. The third sample, PageForge `22d3…`, is a known-family comparison: it constructs `https://updatercheck.com` from plaintext pointer/length fields and stores path components `cleft`, `arete`, and `moraine`. The upstream Maltrail/Zenith list independently includes **both** domains and the two PageForge paths. This strengthens an investigative cluster association, but identical code lineage, C2 tasking, and malicious behavior of `b24e…` remain unproven.
 
-## Samples
+## DuskReader samples (A and B)
 
 | Property | Sample A — candidate precursor | Sample B — network-capable build |
 |---|---|---|
@@ -23,6 +23,21 @@
 | Remote tasking / command execution | Not established | Suspicious strings; **execution not demonstrated** |
 
 Version fields and source/build paths are developer controlled. Neither proves release chronology or common source history by itself.
+
+## Three-sample overview (updated)
+
+| Finding | DuskReader A (`b24e…`) | DuskReader B (`1bd7…`) | PageForge (`22d3…`) |
+|---|---|---|---|
+| Product | PDF Viewer v1.0.0.0 | Docs Viewer v2.1.4633.0 | Document Viewer v9.1.1033.92 |
+| SHA-256 | `b24e3c032e13af00606c9fc2047d16209caa4a14c93210bb2b3c3192421ef635` | `1bd7c3aff7742a28d3664cc7579d34f63189e04120fe9d75e26c910251456da8` | `22d3e48673fa09aca4e67f8c50b64bf76f795aad35755ba2ff8f499d325cf2e3` |
+| Hostname | None identified | `updatedrun.com` | `updatercheck.com` |
+| Host construction | Not established | Rolling additive decoding, key start `F3`, step `F9` | Plaintext `https` + `updatercheck` + `com` pointer/length triplet |
+| Network-related paths | Not identified | `/updater/goal` (constructed in memory) | `/cleft/arete` and `/cleft/moraine` (third-party reported contacted URLs; static path fields independently recovered) |
+| Local state | `duskreader_config.json` (viewer config) | `%LOCALAPPDATA%\DuskReader\config.txt` (UID and setup flag) | `%LOCALAPPDATA%\Riftview\ledger.conf` (observed artifact; content unknown) |
+| Network evidence | No outbound traffic observed | DNS and attempted TCP connection | DNS, TLS SNI, attempted TCP connection; third-party URL reports |
+| CLOUDHAZE / Zenith relationship | **Unestablished** | Plausible, strengthened by external IOC cross-reference | Known-family reference by analyst identification; IOC corroboration independent of code comparison |
+
+**Interpretation:** The three samples are useful comparators but are **not** proved to be three chronological versions of one program. In particular, PageForge is a separate viewer product. A library function, Rust build trait, or URL style alone does not demonstrate common authorship.
 
 ## Shared features and possible development lineage
 
@@ -209,3 +224,77 @@ The reference sample makes the general **working document-viewer + network clien
 | Local file | `%LOCALAPPDATA%\\Riftview\\ledger.conf` | VirusTotal-reported dropped file; exact contents not yet recovered |
 
 **Outstanding work:** Inspect the actual CLOUDHAZE YARA rule matched bytes, compare code paths for registration/task parsing rather than common dependencies, and verify PageForge's config file contents. Only elevate family attribution if implementation-level evidence supports it.
+
+
+---
+
+## Update: PageForge static constructor and Defogger v5.4 (2026-10-17)
+
+Further Malcat analysis identified PageForge configuration initializer **`sub_103D30EB6`**. Near the beginning it allocates **0x30 bytes** for three consecutive Rust-style `{pointer, length}` records and explicitly writes:
+
+```asm
+lea rcx, ["https"]
+mov [rax], rcx
+mov qword ptr [rax+0x08], 0x05
+lea rcx, ["updatercheck"]
+mov [rax+0x10], rcx
+mov qword ptr [rax+0x18], 0x0C
+lea rcx, ["com"]
+mov [rax+0x20], rcx
+mov qword ptr [rax+0x28], 0x03
+```
+
+These three **code-referenced** values support reconstruction of **`https://updatercheck.com` without a supplied IOC or inferred suffix**. The strings are not themselves encrypted/encoded; the program joins separately stored values. Malcat's nonsense-looking `jo`/`jnz` disassembly near the address is an artifact of attempting to interpret packed data as executable instructions.
+
+Within the *same* initializer, the application config structure at `RSI` receives the following pointer/length pairs:
+
+| Field offset | Static value | Declared length |
+|---|---|---:|
+| `RSI+0x398` / `+0x3A0` | `cleft` | 5 |
+| `RSI+0x3A8` / `+0x3B0` | `arete` | 5 |
+| `RSI+0x3B8` / `+0x3C0` | `moraine` | 7 |
+| `RSI+0x3D8` / `+0x3E0` | `VQPLNTAZKMERUHWCFD` | 18 |
+| `RSI+0x3E8` / `+0x3F0` | `ledger.conf` | 11 |
+
+The three path-related components match the independently reported URLs, but **the exact formatter combining these fields into `/cleft/arete` and `/cleft/moraine` has not been recovered**. The uppercase 18-byte string is observed but not classified as a key or identifier without usage analysis.
+
+**`defogger5_4.py`** adds independent, automatic code-backed discovery of scheme/host-stem/suffix triples. Its reported PageForge result is:
+
+```text
+Code-constructed URL bases (no known domain required):
+  https://updatercheck.com
+    [scheme/stem/suffix from code at 0x103D30EDB]
+    'https'       (5 bytes at 0x104479F17)
+    'updatercheck' (12 bytes at 0x104274AAD)
+    'com'         (3 bytes at 0x104464832)
+```
+
+The tool's **zero additive/XOR decoder profile** result on this build remains accurate, and generic false-positive brute-force strings are not evidence of hidden URLs. The recovered base URL is a **static reconstruction**; observed communications were verified independently via Frida and third-party sandbox reporting. V5.4 does **not** automatically validate tasking or independently construct the full paths. Subsequent reverse-engineering of `--update-check` uncovered generic Rust filesystem functionality including `GetFullPathNameW`, `CreateFileW`, and the `Invalid download` error; this is not, by itself, proof that a malicious payload was downloaded or launched, and these standard library routines are not family-specific signatures.
+
+## External cross-reference: Maltrail `zenith.txt`
+
+The community-maintained [Maltrail `malware/zenith.txt`](https://github.com/stamparm/trails/blob/main/malware/zenith.txt) list identifies aliases including **Zenith backdoor** and **Zenith stealer** and provides separate references for sample-level reports. Importantly:
+
+- It lists **`updatedrun.com`**, and its reference header explicitly links to the VirusTotal record for **DuskReader B SHA-256 `1bd7c3…`**.
+- It lists **`updatercheck.com`** together with **`/cleft/arete`** and **`/cleft/moraine`** after a separate VirusTotal reference. The cited third-party hash on the list is **`bfa547…`**, not the exact PageForge `22d3…` sample studied here. The domain/path match corroborates *infrastructure/path associations*, **not** a hash-level match or identical binary.
+- The same source also lists unrelated campaign-associated hosts and other samples. **Membership in this broad IOC list is not evidence that all listed hosts belong to one operator or that every domain is still malicious/active.** Do not automatically expand this report's IOCs to all list entries.
+
+### Revised attribution confidence
+
+| Proposition | Confidence | Reason |
+|---|---|---|
+| DuskReader B embeds and reconstructs `updatedrun.com` | **High** | Direct decoding disassembly and Frida confirmation |
+| PageForge embeds and constructs `updatercheck.com` | **High** | Direct config-constructor disassembly and Defogger v5.4 reconstruction |
+| Both domains appear in community Zenith-related IOC reporting | **High** | Independently verifiable entries in Maltrail list |
+| DuskReader B is associated with the reported QuartzLine/CLOUDHAZE/Zenith activity | **Moderate, provisional** | Independent sample-hash reference plus matched hostname and viewer/update behavior; task schema/code lineage not compared |
+| PageForge `22d3…` shares this broader family | **Moderate, provisional** | Analyst's known-family identification/YARA match, static configuration, and independently reported paths; no exact sample-hash match on cited list |
+| DuskReader A is a clean precursor of B | **Low–moderate** | Shared branding/viewer constructs and differing features; chronology and absence of hidden behavior unproven |
+| The three files are one source codebase / one operator | **Not established** | No distinctive code, protocol, or server-response match established |
+
+### Additional references
+
+- [Maltrail: `malware/zenith.txt`](https://github.com/stamparm/trails/blob/main/malware/zenith.txt) — community IOC listing, DuskReader B hash reference, `updatedrun.com`, `updatercheck.com`, and PageForge-associated endpoint paths (accessed 2026-10-17).
+- [Maltrail raw text](https://raw.githubusercontent.com/stamparm/trails/main/malware/zenith.txt) — line-oriented version for checking entries and surrounding source comments.
+- [Expel: QuartzLine — A working PDF viewer with a backdoor inside](https://expel.com/blog/quartzline-a-working-pdf-viewer-with-a-backdoor-inside/) — external campaign analysis; do not infer per-sample behavior without validation.
+
+**Next validation priorities:** Determine whether PageForge and DuskReader share distinctive protocol serialization, machine-identification, response handling, or execution logic. For PageForge, recover the exact URL path formatting from references to the constructor fields. For DuskReader, confirm whether `/updater/goal` is actually requested and identify the corresponding response parser. For sample A, compare application-specific function implementations and check additional runtime paths before declaring it benign.
