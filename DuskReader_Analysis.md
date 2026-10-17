@@ -153,3 +153,59 @@ The following are from this investigation; applicability and evidentiary type ar
 - Expel, **“QuartzLine: A working PDF viewer with a backdoor inside,”** 2026-10-15: https://expel.com/blog/quartzline-a-working-pdf-viewer-with-a-backdoor-inside/
 - ThreatFox campaign-associated URL report (two-word endpoint convention; attribution is reporter-provided): https://threatfox.abuse.ch/ioc/1965051/
 - Analyst's Malcat disassembly, FLOSS/strings extraction, Frida console output, and byte-level inspection for the two hashes listed above. Primary evidence for DuskReader's internal findings is the lab material, not the external campaign reports.
+
+---
+
+## Follow-up: PageForge reference sample and Defogger investigation (2026-10-17)
+
+**Sample:** `22d3e48673fa09aca4e67f8c50b64bf76f795aad35755ba2ff8f499d325cf2e3`  
+**Filename/metadata:** `pageforge_variant02.exe`; PageForge Document Viewer; version `9.1.1033.92`; company field `Cascade Labs` (all metadata self-reported).  
+**Size:** 10,074,112 bytes, verified by hashing the password-protected specimen archive's contents.  
+**Reference context:** PageForge is treated as a previously recognized CLOUDHAZE sample based on the analyst's external attribution and YARA result. This investigation did not independently validate the YARA rule's exact matched bytes, nor does a branded similarity alone prove common source-code lineage with DuskReader.
+
+### Reproduction: why Defogger reported zero decoders
+
+`defogger5_1.py --auto-additive` returned **0 additive and 0 XOR decoder profiles** against this sample. Independent raw-file inspection established that this specific PageForge build stores relevant network components as **plaintext packed Rust literals**, not necessarily as an encoded hostname needing the rolling-additive decoder:
+
+| File offset | Observed bytes/text | Interpretation |
+|---|---|---|
+| `0x5534AD` | `updatercheck` | Plaintext hostname stem; same as the independently observed domain's first label |
+| `0x5534B9` (adjacent region) | `src\\updater.rs` | Rust source-path/debug artifact near the hostname stem |
+| `0x55351E` | `cleft` | Plaintext URL path component candidate |
+| `0x553523` | `arete` | Plaintext URL path component candidate |
+| `0x553528` | `moraine` | Plaintext URL path component candidate |
+| `0x553541` | `ledger.conf` | Plaintext local configuration filename |
+
+These adjacent bytes **do not form a single contiguous literal URL**. In particular, `updatercheck.com` is not a contiguous string at the identified location; `updatercheck` is followed by other compiled data. The domain and endpoint paths are separately established by observed DNS/TLS and the analyst-provided VirusTotal behavior record.
+
+A dynamic sandbox trace reported `getaddrinfo`/`GetAddrInfoW` for `updatercheck.com`, TLS SNI `updatercheck.com`, and an attempted TCP connection to `91.195.240.123:443`. The narrow-string DNS hook printed junk beyond the domain due to an apparent pointer/string-length mismatch; do **not** treat the trailing characters as an indicator. VirusTotal screenshots reported requests to `https://updatercheck.com/cleft/arete` and `/cleft/moraine` (403 statuses). These observations establish an external connection attempt and reported URL contact, not successful tasking or the nature of response payloads.
+
+**Root cause of Defogger's limitation:** The existing tool's endpoint-recovery path expects a recognized additive/XOR decoder, or a complete contiguous `http(s)://` URL. Here the relevant values are compiled as adjacent **unencoded fragments**. Zero decoder profiles is therefore consistent with this sample. Static analysis has **not** established that PageForge has no other encoded strings or that its whole networking implementation is plaintext.
+
+### Defogger v5.2 modification
+
+`defogger5_2.py` retains the previous additive/XOR discovery and adds generic scanning of plaintext DNS-like candidates in nonexecutable PE sections. It also supports `--observed-domain HOST` to correlate an independently observed network domain against a raw plaintext first-label match, with exact file offset and VA and without fabricating the `.com` suffix or claiming to decode a URL.
+
+Reproduction:
+
+```powershell
+py .\defogger5_2.py .\22d3e48673fa09aca4e67f8c50b64bf76f795aad35755ba2ff8f499d325cf2e3 --auto-additive --observed-domain updatercheck.com
+```
+
+Expected verified match: `updatercheck` at VA `0x104274AAD` (file `0x5534AD`). The program still reports **0 additive and 0 XOR decoder profiles**; this is correct for the signatures it implements, not a detection failure to be concealed. Plaintext domain candidates from generic libraries are expected and must not be labeled C2 without independent evidence.
+
+### Family-relation assessment after PageForge comparison
+
+The reference sample makes the general **working document-viewer + network client + locally stored configuration + two-part endpoint path** pattern more concrete. This supports DuskReader's placement on a **CLOUDHAZE investigative shortlist**, but the code-level result **does not** identify a common decoder: DuskReader reconstructs `updatedrun.com` using progressive addition (`F3` start, `F9` step); PageForge has a plaintext `updatercheck` stem and Defogger identifies no corresponding decoder. Similar endpoint shapes and Rust tooling may result from common builder templates, but **shared original code, operator control, and command protocol are not yet demonstrated**. DuskReader sample B remains **low-to-moderate confidence CLOUDHAZE-related**, subject to more discriminative code/protocol comparison; candidate precursor sample A remains unproven malicious.
+
+### Additional reference indicators (PageForge only)
+
+| Type | Value | Evidence / caution |
+|---|---|---|
+| SHA-256 | `22d3e48673fa09aca4e67f8c50b64bf76f795aad35755ba2ff8f499d325cf2e3` | Cryptographically verified specimen |
+| Domain | `updatercheck.com` | Observed DNS and TLS SNI |
+| URLs | `https://updatercheck.com/cleft/arete`; `https://updatercheck.com/cleft/moraine` | Analyst-provided VirusTotal contacted-URL screenshot; 403 responses reported |
+| IP:port | `91.195.240.123:443` | Dynamic connection attempt in one sandbox run; potentially time-dependent/shared |
+| Local file | `%LOCALAPPDATA%\\Riftview\\ledger.conf` | VirusTotal-reported dropped file; exact contents not yet recovered |
+
+**Outstanding work:** Inspect the actual CLOUDHAZE YARA rule matched bytes, compare code paths for registration/task parsing rather than common dependencies, and verify PageForge's config file contents. Only elevate family attribution if implementation-level evidence supports it.
