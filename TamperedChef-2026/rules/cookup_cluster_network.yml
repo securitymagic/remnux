@@ -1,0 +1,26 @@
+title: CookUp Related Installer Preparation URI on Known Hosts
+id: 28e05dbd-b6bb-4a92-9db1-28c0e4b1f929
+status: experimental
+description: Matches prep phase on known research hosts. Associated activity only; not proof of malware.
+author: Community research
+date: 2026/11/01
+logsource:
+  category: proxy
+detection:
+  selection:
+    cs-uri-query|contains: 'init=prep'
+    cs-host|contains:
+      - 'applicensingstudio.com'
+      - 'setuppdfsoft.com'
+      - 'cookingsuiteinstaller.com'
+      - 'reciperoverapp.com'
+      - 'nomadiccooknow.com'
+      - 'nomadiccookapp.com'
+      - 'mypdfsoftware.com'
+      - 'webpdfinstallerstudio.com'
+      - 'appsetupstore.com'
+      - 'peregrinecooksoft.com'
+  condition: selection
+falsepositives:
+  - Authorized downloads or unrelated services using same hostnames
+level: medium
