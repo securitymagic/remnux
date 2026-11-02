@@ -1,0 +1,6 @@
+type,indicator,notes
+sha256,e1d8cea8f23a4c2ccfa104e367eee028c16484db9fb635c17ed05761ede1e0be,cook4.exe original installer
+sha256,2a22c1561e3a662e68d47823a49e8fae8f9dfc375a8f5e2271dbb901b3f9b3ef,RecipeRover.Setup.dll pre-de4dot carve
+domain,reciperoverapp.com,network host
+url_pattern,https://reciperoverapp.com/?ver=*&apiid=*&init=prep,observed preparation stage
+url_pattern,https://reciperoverapp.com/?ver=*&apiid=*&uid=*&init=fin,observed final stage
