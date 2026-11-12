@@ -3,7 +3,7 @@
 **Technical malware analysis | November 12, 2026**  
 **Scope:** CoolPDF / `AppPDF_322784.exe` — Inno Setup native loader investigation
 
-> **Confidence and limitations:** The native DLL contains an LFSR-style transformation, shared DragonsGate constant, and manual PE mapping implementation. The instrumented run did **not** observe successful second-stage execution. The server response format and activation logic remain unconfirmed.
+> **Update — 12 November 2026:** Later Ghidra analysis and controlled Frida runs resolved a **digit-parity response check** and identified an **environment-dependent branch**. Forcing the latter to return false allowed two additional HTTP requests and a temporary-file processing attempt. The third response had an empty body; **no second-stage payload or PE execution was observed**.
 
 ## 1. Executive summary
 
@@ -11,9 +11,9 @@ A signed PDF utility installer distributing **CoolPDF 2.1.1.0** contains a modif
 
 **Principal finding:** The extracted DLL matches a custom DragonsGate YARA hunt on a distinctive 32-byte constant and LFSR-seed indicator. Ghidra confirms executable code copies that exact constant, applies a bitwise LFSR-style transformation, and provides a manual mapper for 32-bit PE files. This is stronger than a static string match alone.
 
-Static analysis also exposed XOR-obfuscated `LP|` and `RP|` command prefixes. The former invokes a file-loading routine with a custom four-byte length trailer; the latter leads to the staged processing routine containing the PE mapper. The installer was observed contacting `innodocumentsetup.com` before its welcome GUI. However, early-child Frida instrumentation did **not** observe the payload-loading or manual-mapping functions execute in the tested run.
+Static analysis also exposed XOR-obfuscated `LP|` and `RP|` command prefixes. The former invokes a file-loading routine with a custom four-byte length trailer; the latter leads to the staged processing routine containing the PE mapper. The installer was observed contacting `innodocumentsetup.com` before its welcome GUI. Later early-child instrumentation and a controlled runtime environment-check bypass reached a second and third HTTP request, followed by a failed `PG|` operation on a zero-byte temporary file. The payload-loading and manual-mapping hooks still did **not** show successful execution.
 
-**Scope / confidence:** High confidence that this DLL contains a DragonsGate-related loader implementation; **not** a confirmed successful infection chain or recovered second-stage payload. The relationship between the HTTP response and loader activation remains unproven.
+**Scope / confidence:** High confidence that this DLL contains a DragonsGate-related loader implementation; **not** a confirmed successful infection chain or recovered second-stage payload. The first response’s digit-parity check is confirmed, but the server-side decision to deliver a payload and successful next-stage execution remain unproven.
 
 ## 2. Sample details and indicators
 
@@ -163,7 +163,7 @@ The internal dispatcher `FUN_100049EE` calls decoding helpers to recover command
 | `EB 00 F8 00 D5 00` | `LP|` | Passes trailing string to `FUN_10002CFB` for file read and validation |
 | `F5 00 F8 00 D5 00` | `RP|` | Calls `FUN_10002893` with trailing string and another derived argument |
 
-The dispatcher is called by both `FUN_10004968` and `FUN_10004F6F`, and another handler, `FUN_100030AA`, can process inputs not recognized by the first. Its small wrapper `FUN_10003066` uses the same string-XOR method. The specific decoded prefix in that secondary branch was not recovered from bytes in this session.
+The dispatcher is called by both `FUN_10004968` and `FUN_10004F6F`, and another handler, `FUN_100030AA`, can process inputs not recognized by the first. Its small wrapper `FUN_10003066` uses the same string-XOR method; later instrumentation recovered the `PG|` prefix in this secondary branch.
 
 A worker-thread helper, `FUN_1000163B`, executes callbacks while pumping GUI messages and updating an `msctls_progress32` control. This is a normal UI pattern by itself and does not establish an IPC-based activation route.
 
@@ -173,7 +173,7 @@ A worker-thread helper, `FUN_1000163B`, executes callbacks while pumping GUI mes
 
 ### 6.1 Network request and response
 
-Fiddler captured an HTTPS GET to `innodocumentsetup.com`, with query parameters `app=e0c8a6bb`, `re=43c1fe30` and `xn=p`, and a User-Agent of `Inno Setup 6.2.0`. The original HTTP 200 response body was 32 printable hex characters. Its semantics remain unknown.
+Fiddler captured an HTTPS GET to `innodocumentsetup.com`, with query parameters `app=e0c8a6bb`, `re=43c1fe30` and `xn=p`, and a User-Agent of `Inno Setup 6.2.0`. The original HTTP 200 response body was 32 printable hex characters. Subsequent Ghidra and Frida analysis established its use as input to a local `VER|` digit-parity check (section 6.4).
 
 ![Fiddler request to innodocumentsetup.com and 32-character response](DragonsGate_Modified_7Zip_Loader_Analysis_images/figure_06.png)
 
@@ -181,7 +181,7 @@ Fiddler captured an HTTPS GET to `innodocumentsetup.com`, with query parameters 
 
 ### Protocol differences from previously analyzed DragonsGate variants
 
-The observed request structure in this Inno Setup / 7-Zip implementation (`?app=e0c8a6bb&re=43c1fe30&xn=p`) differs from the earlier `init=prep` and randomized-parameter requests investigated in other DragonsGate builds. The server returned a 32-character hexadecimal string, but its purpose has not been determined. In particular, **there is no evidence that the earlier parity-based validation or response model applies to this variant**. Shared LFSR and PE-loading code does not establish a shared HTTP activation protocol. The `LP|` and `RP|` prefixes are *internal DLL commands*, not observed HTTP response instructions.
+The observed request structure in this Inno Setup / 7-Zip implementation (`?app=e0c8a6bb&re=43c1fe30&xn=p`) differs from the earlier `init=prep` and randomized-parameter requests investigated in other DragonsGate builds. **Subsequent analysis confirmed that this variant does implement a digit-sum parity check** for the `VER|` response (section 6.4), although that does not establish identical protocols across variants. The `LP|` and `RP|` prefixes are *internal DLL commands*, not observed HTTP response instructions.
 
 ### 6.2 Controlled response comparison
 
@@ -242,6 +242,121 @@ The console showed the following dispatcher inputs, including one additional occ
 
 The saved Python launcher log contains process-interception events, but not the `[DG]` JavaScript trace lines. The function-hit observations above are transcribed from the session's console output supplied during analysis. Counts apply to the instrumented session, not every possible execution path.
 
+
+### 6.4 Gate 1 — server response digit-parity check (confirmed in Ghidra and Frida)
+
+The installer passes the 32-character HTTP response to the DLL as `VER|<response>`. `FUN_10004968` recognizes the four-character `VER|` prefix and calls `FUN_1000465D` on the suffix. The latter trims the suffix at a space, tab or line break, adds **only ASCII decimal digits** (`0`–`9`) and chooses one of two output strings. The normal passing condition is **nonzero, even digit sum**, subject to its separate `FUN_1000383E()` preliminary check. The special suffix `.` bypasses the ordinary zero/odd rejection condition.
+
+Simplified logic from the decompiled function (not a full reimplementation):
+
+```c
+sum = 0;
+for (each UTF16 character c before whitespace)
+    if (c >= '0' && c <= '9') sum += c - '0';
+if (suffix != "." && (sum == 0 || (sum & 1) != 0))
+    result = failure_string;  // observed "A"
+else
+    result = success_string;  // observed "OK"
+```
+
+| Response source | 32-character body | Digit sum | Observed DLL output |
+| --- | --- | ---: | --- |
+| Unmodified live response, later run | `F357AF7B013FB557063C3765641C4C27` | 97 (odd) | `A` |
+| Fiddler AutoResponder replay | `DD8CCF3E63FD7D2B8CD9986124FF7D81` | 92 (even) | `OK` |
+
+The output is pushed into an internal 32-slot, 4 KiB-per-slot string stack using `FUN_10001E9B` (push); `FUN_10001E33` pops a value. `FUN_10001D67` provides a structured request/result interface, although this particular routine was **not shown executing** in the captured console trace; the passive interface-hook initialization requires separate JSONL confirmation. Importantly, `OK` is a **local DLL parity result**, not proof of server authorization or stage-two execution.
+
+### 6.5 Gate 2 — environment checks, forced-false dynamic bypass
+
+When `CoolPDF.App.exe` reaches the fallback branch of `FUN_10004968`, the DLL calls `FUN_1000411C`. Its decompiled implementation inspects the module filename (`GetModuleFileNameW`), enumerates files (`FindFirstFileW` / `FindNextFileW`), loaded modules (`CreateToolhelp32Snapshot(TH32CS_SNAPMODULE)`), and processes (`TH32CS_SNAPPROCESS`), plus additional opaque checks. Matching target values have not all been decoded. It returns a Boolean; `true` drives the observed `invalid_name` path, whereas `false` calls `FUN_1000448B` and then `FUN_10004D1A`.
+
+`FUN_1000448B` profiles two `HKEY_LOCAL_MACHINE` registry paths through wrappers consistent with `RegOpenKeyExW`, `RegEnumKeyExW`, `RegQueryValueExW` and `RegCloseKey`. It updates the environment flag word at `DAT_10118C64`. `FUN_10004D1A` takes the low 16 bits of `FUN_100043A9()` and pushes the resulting **decimal string** into the output stack. The flag meanings and other checks remain partially unresolved.
+
+Using Frida 17.7.3 in the already suspended Inno child, the analysis **overrode only the function return** at `is7z.dll + 0x411C` (original code still executed). Representative patch:
+
+```javascript
+Interceptor.attach(module.base.add(0x411c), {
+  onLeave(retval) {
+    const original = retval.toInt32();
+    send({ event: 'env_gate_forced_false', originalReturn: original, forcedReturn: 0 });
+    retval.replace(0);
+  }
+});
+```
+
+This was combined with a previously captured positive-even-sum response through Fiddler AutoResponder, in an isolated FLARE-VM; it is **not the behavior of the unmodified installer on the tested host**.
+
+The runtime trace directly confirms the branch override and subsequent result:
+
+```text
+is7z.dll+0x411C: originalReturn=1, forcedReturn=0
+message sink from is7z.dll+0x4D5A: "4224"
+"VER|." -> "OK"
+"P|1|2.1.1.0|4224"
+"UPD|1|2.1.1.0|4224"
+```
+
+**Causality in this controlled run:** with the same earlier response replayed as `OK`, changing the environment-check result from `1` to `0` exposed the registry-profiling/decimal-output path and allowed the installer to continue into additional network operations. The `4224` value was *observed*, not decoded into individual environmental flags.
+
+### 6.6 Newly reached C2 sequence and empty-file stopping point
+
+Fiddler observed the following consecutive HTTPS requests after the patched branch. URL values are **specific to this run**; do not assume these `app`, `re` and `uu` tokens are stable IOCs.
+
+| Order | Request to `innodocumentsetup.com` | Observed response |
+| --- | --- | --- |
+| 1 | `/?app=e0c8a6bb&re=43c1fe30&xn=p` | Replayed `DD8CCF3E63FD7D2B8CD9986124FF7D81` (32 ASCII chars) |
+| 2 | `/?app=4624ea57&re=d6f942aa&xn=p` | `FBC8761484A07C102D95094AF21F1AEE` (32 ASCII chars) |
+| 3 | `/?app=98e71c7b&re=0e5c0bf5&uu=e083c989&xn=f` | HTTP 200; **`Content-Length: 0`** |
+
+The second response is present in the WinHTTP plaintext read trace. The third response is documented in Fiddler as 200 with no entity body. The meaning of `uu` and `xn=f` is **unknown**; the changing parameters mark a distinct request, not proof that the server intentionally rejected the host.
+
+![Fiddler request sequence with second response](DragonsGate_Modified_7Zip_Loader_Analysis_images/gated_fiddler_second_response.png)
+
+*Figure 10. Additional request after bypass and its 32-character response.*
+
+![Fiddler third request with zero-length response](DragonsGate_Modified_7Zip_Loader_Analysis_images/gated_fiddler_empty_third.png)
+
+*Figure 11. The third request returned HTTP 200 and `Content-Length: 0`.*
+
+After the third request the DLL was asked to process a temporary file via the **separate** `PG|` path:
+
+```text
+PG|C:\Users\drago\AppData\Local\Temp\is-1BGS7.tmp\4F5C.tmp
+    -> BAD|0
+```
+
+The trace places `BAD|0` at `FUN_10002E47` → `FUN_10001E9B` (string push from call site `is7z.dll+0x2F14`). This **does not establish** a call to the different `LP|` file reader at `FUN_10002CFB`. In the observed run, neither the dedicated file-load, buffer-store, stage-processing nor manual mapper hooks reported invocation.
+
+In a subsequent visual observation during the setup's `Starting CoolPDF... Please wait.` window, a similarly named `.tmp` file appeared **alongside `is7z.dll`**, remained **0 bytes** across refreshes, and was deleted once the ordinary setup GUI appeared. The screenshot shows a later run, so its random temp filename differs from `4F5C.tmp` in the logged run. This is strong evidence of an empty download/output artifact and cleanup, **not** proof of how the `PG|` routine would react to a valid payload.
+
+![Zero-byte staging file alongside is7z.dll](DragonsGate_Modified_7Zip_Loader_Analysis_images/gated_zero_byte_temp.png)
+
+*Figure 12. Later run: a zero-byte staging file, the modified DLL, and two 32-byte temporary files in the Inno temp directory.*
+
+![CoolPDF updating window](DragonsGate_Modified_7Zip_Loader_Analysis_images/gated_coolpdf_wait.png)
+
+*Figure 13. Temporary setup progress window, before the staging file is removed and the standard GUI appears.*
+
+### 6.7 Resulting execution chain (confirmed vs. inferred)
+
+```text
+Inno parent -> pre-GUI AppPDF_322784.tmp child
+  -> load modified is7z.dll
+  -> GET #1 / VER|<32 ASCII chars>
+  -> digit-parity result: A (odd) or OK (positive-even)
+  -> CoolPDF.App.exe fallback command
+  -> FUN_1000411C environment check [normally true on analysis VM]
+       true  -> invalid_name / no further observed stages
+       false -> registry profiling + 16-bit decimal output [forced by Frida]
+  -> VER|. -> OK; P|1|... and UPD|1|... observed
+  -> GET #2 (32 ASCII chars) -> GET #3 (empty HTTP 200)
+  -> zero-byte .tmp -> PG|<path> -> BAD|0
+  -> temporary file cleanup -> normal installer GUI
+  -> no second-stage PE recovered or observed executing
+```
+
+This identifies **two distinct locally implemented conditions**, one response-content check and one environmental gate. Only the environmental check was altered in the documented Frida bypass; the first response was controlled using Fiddler AutoResponder. Server-side payload selection remains unproven, and there is no claim that `BAD|0` was bypassed or that execution progressed into the in-memory PE mapper.
+
 ## 7. Detection and hunting opportunities
 
 Defenders can hunt this implementation using a layered approach, prioritizing the precise static constant and supporting code or behavioral context over broad PDF-software indicators.
@@ -284,17 +399,23 @@ This is a simple IOC-oriented example, not the user's tested `DragonsGate_Shared
 | `0x10002606` | LFSR-style transformation |
 | `0x1000238E` | Wrapper around manual mapper |
 | `0x100023BA` | Manual x86 PE mapping |
-| `0x100030AA` | Secondary string handler |
+| `0x100030AA` | Secondary string handler (`PG|` and other commands) |
+| `0x10004968` | General handler: `VER|` recognition and environment-dependent fallback |
+| `0x1000465D` | Digit-parity response check |
+| `0x1000411C` | Environment check, forced to return false during controlled test |
+| `0x1000448B` | Registry/environment profiling |
+| `0x10004D1A` | Low-16-bit decimal result formatting |
+| `0x10001E9B` / `0x10001E33` | String stack push / pop |
 | `0x100DA408` | Shared constant data, not executable function |
 
 ## 8. Conclusions and unresolved questions
 
-The CoolPDF installer includes a native 7-Zip-compatible DLL that carries a distinctively DragonsGate-related data transformation and a genuine manual PE-mapping implementation. The shared 32-byte constant is referenced by executable code, and XOR-obfuscated internal commands provide paths to load and process staged data. The installer also establishes a pre-GUI network connection with `innodocumentsetup.com`.
+The CoolPDF installer includes a modified 7-Zip-compatible DLL that contains DragonsGate-related transformation and manual PE-mapping code. Its pre-GUI HTTP response is passed into the DLL as `VER|<token>` and handled by a **confirmed decimal-digit parity gate**. A separate environment-checking function normally returned `true` on the FLARE-VM and led to `invalid_name`; forcing that return to `false` **at runtime** exposed registry profiling, decimal output (`4224`), two additional C2 requests, and a `PG|` attempt to process a zero-byte temporary file.
 
-In controlled tests, the visible GUI appeared regardless of whether the endpoint returned its original hexadecimal response, an all-zero value or HTTP 403. A Frida trace attached to the Inno child from process startup recorded dispatcher calls but not the file-reading, buffer-initialization, stage-processing or manual-PE-mapping functions.
+The third HTTPS request returned HTTP 200 with `Content-Length: 0`. The DLL emitted `BAD|0`; the installer removed its temporary staging file and continued into the ordinary CoolPDF GUI. **No next-stage binary was downloaded or recovered, and no manual PE mapping was observed.** The evidence does not distinguish deliberate server gating from inactive delivery or other conditions, and `PG|` has not been proven to directly invoke the `LP|` / `RP|` loader path.
 
-**Final assessment:** Confirmed native manual-PE-loader functionality and shared DragonsGate decoding indicators within `is7z.dll`. Observed command dispatcher activity and pre-GUI HTTP communication. Not observed successful payload activation, second-stage recovery, or a verified server response format that unlocks the loader.
+**Final assessment:** Confirmed DragonsGate-related native PE-loader code, local response-parity gate, environment-dependent path and controlled bypass of that path; demonstrated progression into additional network activity and a failed zero-byte file-processing operation. Stage-two delivery and successful execution remain **unconfirmed**.
 
-Future analysis would be best served by correlating the network response with its actual consumer, or by obtaining a sample/run that reaches the `LP|` and `RP|` paths. Further reverse engineering of generic UI callbacks is unlikely to materially change these findings.
+Possible follow-up: trace `PG|` file handling to identify exactly why it returns `BAD|0`, or compare behavior against a known valid payload file if one becomes available. Preserve the unmodified run and the patched run separately for reproducibility.
 
-Prepared from reverse-engineering excerpts, screenshots and FLARE-VM dynamic-analysis observations supplied in the investigation session, 12 November 2026. This report documents behavior observed or code identified in a suspicious installer; it does not contain or redistribute malware binaries.
+Prepared from Ghidra decompilation, Frida 17.7.3 logs, Fiddler sessions and FLARE-VM screenshots, 12 November 2026. The testing described here was performed against an isolated research VM with a targeted Frida return-value override; the report does not distribute malware binaries.
