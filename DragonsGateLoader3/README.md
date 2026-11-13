@@ -1,9 +1,11 @@
 # DragonsGate: A Modified 7-Zip DLL Hiding an In-Memory PE Loader
 
-**Technical malware analysis | November 12, 2026**  
+**Technical malware analysis | Updated November 13, 2026**  
 **Scope:** CoolPDF / `AppPDF_322784.exe` — Inno Setup native loader investigation
 
-> **Update — 12 November 2026:** Later Ghidra analysis and controlled Frida runs resolved a **digit-parity response check** and identified an **environment-dependent branch**. Forcing the latter to return false allowed two additional HTTP requests and a temporary-file processing attempt. The third response had an empty body; **no second-stage payload or PE execution was observed**.
+> **Earlier update — 12 November 2026 (late analysis):** Additional synthetic-buffer experiments established the `PG| → LP| → RP|` progression without patching `BAD|0`, confirmed the four-byte length trailer and minimum processing size, and observed three LFSR transformations. A read-only Frida probe captured an out-of-range decoded length before PE mapping. Static inspection recovered five short obfuscated *expected exports* (`cx1`, `cx2`, `cx3`, `ac`, `dc`) and established that the DLL includes an in-memory PE export resolver and multi-stage PE mapper. **No real subsequent-stage binary was recovered or executed.**
+
+> **Update — 13 November 2026:** Reconstructed both `xn=p` and `xn=f` native URL templates, the hardcoded `app`/`re` values for the final request, and the random-plus-environment-encoded `uu` field. Frida v7.1–v7.3 experiments identified the origins of the recurring aggregate status `4224` (`0x1080`) and encoded flag mask `264` (`0x0108`). A controlled replacement of the registry hash matcher at `is7z.dll + 0x38ED` suppressed **868 matcher calls** and brought both status values and all 14 underlying flags to zero. The subsequent `xn=f` HTTPS response still had **`Content-Length: 0`**. Thus the observed registry detection is causally responsible for the client flags but has **not** been shown to be the remote payload-delivery gate. No authentic next stage recovered. See §6.11–6.16.
 
 ## 1. Executive summary
 
@@ -11,7 +13,7 @@ A signed PDF utility installer distributing **CoolPDF 2.1.1.0** contains a modif
 
 **Principal finding:** The extracted DLL matches a custom DragonsGate YARA hunt on a distinctive 32-byte constant and LFSR-seed indicator. Ghidra confirms executable code copies that exact constant, applies a bitwise LFSR-style transformation, and provides a manual mapper for 32-bit PE files. This is stronger than a static string match alone.
 
-Static analysis also exposed XOR-obfuscated `LP|` and `RP|` command prefixes. The former invokes a file-loading routine with a custom four-byte length trailer; the latter leads to the staged processing routine containing the PE mapper. The installer was observed contacting `innodocumentsetup.com` before its welcome GUI. Later early-child instrumentation and a controlled runtime environment-check bypass reached a second and third HTTP request, followed by a failed `PG|` operation on a zero-byte temporary file. The payload-loading and manual-mapping hooks still did **not** show successful execution.
+Static analysis also exposed XOR-obfuscated `LP|` and `RP|` command prefixes. The former invokes a file-loading routine with a custom four-byte length trailer; the latter leads to the staged processing routine containing the PE mapper. The installer was observed contacting `innodocumentsetup.com` before its welcome GUI. Early-child instrumentation and a controlled environment-check bypass reached a second and third HTTP request. The natural response left a zero-byte temporary file and `PG|` failed; controlled synthetic-file substitution later demonstrated successful `PG|` and `LP|`, followed by `RP|` and three LFSR calls. The synthetic data failed its decoded-length validation, so manual PE mapping was not dynamically reached.
 
 **Scope / confidence:** High confidence that this DLL contains a DragonsGate-related loader implementation; **not** a confirmed successful infection chain or recovered second-stage payload. The first response’s digit-parity check is confirmed, but the server-side decision to deliver a payload and successful next-stage execution remain unproven.
 
@@ -52,7 +54,7 @@ Hashes, certificate fields and network indicators are from the screenshots and a
 
 \*Figure 3. Fig. 3 — innounp extraction shows {tmp}\is7z.dll beside the application payload.\*
 
-The DLL retains 15 conventional-looking 7-Zip archive and codec exports, including `CreateObject`, `CreateDecoder`, `CreateEncoder`, `GetHandlerProperty`, `GetNumberOfFormats` and `SetCodecs`. No suspicious `cx1`/`cx2`/`cx3` exports were present in the observed export table. The malicious-capable functionality is instead reached through internal functions.
+The DLL retains 15 conventional-looking 7-Zip archive and codec exports, including `CreateObject`, `CreateDecoder`, `CreateEncoder`, `GetHandlerProperty`, `GetNumberOfFormats` and `SetCodecs`. No `cx1`/`cx2`/`cx3` exports were present in the **observed `is7z.dll` export table**. These names are instead **obfuscated strings the loader resolves on subsequently mapped PEs**; they should not be confused with `is7z.dll` exports. The malicious-capable functionality of `is7z.dll` is reached through internal functions.
 
 ![VirusTotal custom YARA rule detection of DLL](DragonsGate_Modified_7Zip_Loader_Analysis_images/figure_04.png)
 
@@ -296,7 +298,7 @@ message sink from is7z.dll+0x4D5A: "4224"
 "UPD|1|2.1.1.0|4224"
 ```
 
-**Causality in this controlled run:** with the same earlier response replayed as `OK`, changing the environment-check result from `1` to `0` exposed the registry-profiling/decimal-output path and allowed the installer to continue into additional network operations. The `4224` value was *observed*, not decoded into individual environmental flags.
+**Causality in this controlled run:** with the same earlier response replayed as `OK`, changing the environment-check result from `1` to `0` exposed the registry-profiling/decimal-output path and allowed the installer to continue into additional network operations. At this stage the `4224` value was observed but not decoded. **Follow-up work on 13 November established its origin as the aggregate status `DAT_10118C64`, distinct from the 14-flag mask produced by `FUN_100043AF` (see §6.12).**
 
 ### 6.6 Newly reached C2 sequence and empty-file stopping point
 
@@ -308,7 +310,7 @@ Fiddler observed the following consecutive HTTPS requests after the patched bran
 | 2 | `/?app=4624ea57&re=d6f942aa&xn=p` | `FBC8761484A07C102D95094AF21F1AEE` (32 ASCII chars) |
 | 3 | `/?app=98e71c7b&re=0e5c0bf5&uu=e083c989&xn=f` | HTTP 200; **`Content-Length: 0`** |
 
-The second response is present in the WinHTTP plaintext read trace. The third response is documented in Fiddler as 200 with no entity body. The meaning of `uu` and `xn=f` is **unknown**; the changing parameters mark a distinct request, not proof that the server intentionally rejected the host.
+The second response is present in the WinHTTP plaintext read trace. The third response is documented in Fiddler as 200 with no entity body. Later native-code reversing established the `uu` field construction and the hardcoded `xn=f` selector (see §6.11); neither fact proves that the server intentionally rejected this host.
 
 ![Fiddler request sequence with second response](DragonsGate_Modified_7Zip_Loader_Analysis_images/gated_fiddler_second_response.png)
 
@@ -357,6 +359,121 @@ Inno parent -> pre-GUI AppPDF_322784.tmp child
 
 This identifies **two distinct locally implemented conditions**, one response-content check and one environmental gate. Only the environmental check was altered in the documented Frida bypass; the first response was controlled using Fiddler AutoResponder. Server-side payload selection remains unproven, and there is no claim that `BAD|0` was bypassed or that execution progressed into the in-memory PE mapper.
 
+### 6.8 Controlled synthetic-file validation: `PG| → LP| → RP|`
+
+The unmodified server-side download response did not provide a usable payload: the staging `.tmp` file was observed empty. Rather than claim that the server delivered a second stage, the analyst used a controlled Frida/Python substitution at the `PG|` command boundary. A harmless local binary fixture replaced the empty temporary file; no executable PE was inserted. The environment-check bypass was retained, but the `BAD|0` response was **not** overwritten.
+
+Ghidra's `FUN_10002E1A` requires a file size greater than four bytes and a little-endian, four-byte final trailer equal to `total_size - 4`. With a 131,072-byte inert body and a four-byte trailer (131,076 total), dynamic hooks established:
+
+```text
+PG|<temp fixture>  -> OK|131076
+LP|<temp fixture>  -> FUN_10002E1A = 1; FUN_10002CFB = 1; OK|0
+RP|<original installer path>|526036 -> FUN_10002893 = 0
+```
+
+The `RP|` string names the original installer but the routine consumes the **buffer previously stored by `LP|`** in `DAT_10118C5C` and its size in `DAT_10118C60`; the third numeric field is not proof of a downloaded payload. The first fixture failed the size gate in `FUN_10002893`: `(stored_size >> 2) > 0xFFFF`.
+
+A second inert fixture used a 524,288-byte body plus the four-byte trailer (524,292 total). It passed both file gates and triggered three calls to `FUN_10002606`, operating on a newly assembled working buffer with lengths `0x20`, `0x40`, and `0x20001` bytes. The source-header region is transformed three times, the shared 32-byte constant twice, and the remainder once; the transform resets to seed `0x95000000` on each call.
+
+### 6.9 Read-only decoded-length probe: confirmed rejection before PE mapping
+
+The v4 Frida probe observed the four bytes at `working_buffer + 0x40` **after** the third LFSR call. No payload bytes, functions, or return values were changed by this probe.
+
+| Field | Observed |
+| --- | --- |
+| Working-buffer length | `0x20001` (131,073) |
+| Raw pre-transform length-field value | `0x4E4F` (20,047), as logged by the probe |
+| Bytes after transformation | `B6 9E 14 E0` (little-endian) |
+| Decoded unsigned length | `0xE0149EB6` (3,759,447,734) |
+| Required decoded length | `0x10000 < length < 0x1FFBD` (65,537–131,004 bytes) |
+| Range test | **False** |
+| PE mapper reached dynamically | **No** |
+
+The function returned `0` immediately after the out-of-range value was produced. This establishes a concrete stop point **for the inert fixture**, not proof that the real server payload would have the same format failure.
+
+### 6.10 Static in-memory PE mapping and staged export interface
+
+The underlying mapper `FUN_100023BA`, called through `FUN_1000238E`, validates `MZ`, `PE\0\0`, and x86 machine type `0x014C`, maps sections, processes base relocations and imports through helper functions, adjusts page protection, invokes TLS callbacks, and can invoke DLL initialization with `DLL_PROCESS_ATTACH`. For non-DLL images it returns a mapped-image structure with the entry-point pointer; execution of that pointer is not demonstrated by this function alone. The helper functions' exact behavior has not all been independently confirmed. Ghidra's `void` prototype for the wrapper is inconsistent with the pointer return checked by its caller and should be corrected after checking assembly.
+
+`FUN_1000227B` resolves exports from a manually mapped PE using name or ordinal. For name lookup, it builds a cached table of export-name pointers and ordinals, using sort/search helpers, then returns `mapped_base + AddressOfFunctions[index]`. The shown code does not explicitly handle forwarded exports.
+
+Two small routines (`FUN_100027D8` and `FUN_100027A1`) decode expected export names using `encoded[i] XOR (0xA7 + i)`, writing either three or two decoded bytes to an adjacent buffer and setting an initialization flag. These five records were recovered from Ghidra bytes:
+
+| Ghidra VA | Encoded bytes | Decoded expected export | Used for |
+| --- | --- | --- | --- |
+| `0x100F7020` | `C4 D0 98` | `cx1` | First mapped PE; invoked to produce another buffer |
+| `0x100F702C` | `C4 D0 9B` | `cx2` | Fallback if `ac` is absent from second mapped PE |
+| `0x100F7038` | `C4 D0 9A` | `cx3` | Fallback if `dc` is absent from second mapped PE |
+| `0x100F7044` | `C6 CB` | `ac` | Preferred export for second-stage buffer-processing call |
+| `0x100F7050` | `C3 CB` | `dc` | Preferred export for final mapped-stage call |
+
+`FUN_10002893` is structured to map a first PE, resolve and invoke `cx1`, map a PE returned from that invocation, then try `ac`/`cx2` and `dc`/`cx3` as compatible interfaces. These are **expected exported function names in unavailable in-memory stages**, *not* names confirmed in the exports of the observed `is7z.dll`, and **not observed later-stage executions**. Similar `cx1` references were found in earlier CookUp/DragonsGate work; the shared short identifier supports a code-pattern pivot, not campaign attribution by itself.
+
+### 6.11 Native URL construction and protocol fields (13 November update)
+
+The Inno Pascal Script's `UPD|1|2.1.1.0|4224` command reaches the native DLL's request builder `FUN_10005730` (Ghidra VA `0x10005730`). The DLL produces the final request through `wsprintfA` and an obfuscated format string decoded by `FUN_10005E80`. Its recovered template is:
+
+```text
+/?%s=%.8s&%s=%.8s&%s=%s&xn=f
+```
+
+`FUN_10006E90` supplies `app`; `FUN_10006EF0` supplies `re`; `DAT_10119E88` supplies `uu`. `FUN_10006A40` returns a hardcoded, XOR-obfuscated ASCII string `98e71c7b0e5c0bf5`: its first eight characters provide `app=98e71c7b`, and characters 9–16 give `re=0e5c0bf5`. The outer URI format from `FUN_10005DE0` is `https://%s%s`; `FUN_10006370` supplies `innodocumentsetup.com`. The earlier template at Ghidra data `0x100DAB10` is `/?%s=%.8s&%s=%.8s&xn=p`.
+
+`FUN_10005550` constructs the `uu` field by combining an `_rand_s`-derived, 16-bit random value, a nibble-wise transformation of characters from the hardcoded identifier string, and the output of `FUN_100043AF` (environment mask). The obfuscated formatting string is `%.4s%s`: four hex characters of a random component followed by four calculated hex characters. Thus `uu` can vary between runs **even when environmental flags are identical**. Client-side construction is proven; any server validation of `uu` is inferred, not verified.
+
+### 6.12 Two distinct environment values: `4224` and `264`
+
+`FUN_1000448B` resets the aggregate status at `DAT_10118C64` and fourteen DWORD flags at `DAT_10118C68`–`DAT_10118C9C`; it initializes scanning (`FUN_10003A18`), enumerates two HKLM registry trees, processes key/value strings with `FUN_100038ED`, finalizes (`FUN_10003A8D`), and executes three further tests. The aggregate is formatted and appears in the installer commands as `P|1|2.1.1.0|4224` / `UPD|1|2.1.1.0|4224`. Separately `FUN_100043AF` compacts the *fourteen flags* into a differently assigned mask, used by `FUN_10005550` to derive `uu`.
+
+| Runtime source | Observed value before registry bypass | Bits / active flags | Role |
+| --- | --- | --- | --- |
+| `DAT_10118C64` | `4224` (`0x1080`) | aggregate `0x1000`, `0x0080` | string returned through command interface, including `P|` / `UPD|` |
+| `FUN_100043AF()` | `264` (`0x0108`) | `DAT_10118C84 = 1` gives `0x0100`; `DAT_10118C98 = 1` gives `0x0008` | incorporated into final `uu` derivation |
+
+The aggregate and compact mask are **not the same bit field** and must not be interpreted interchangeably. `FUN_100043AF` tests 14 flag DWORDs and maps them to bits `0x8000` down to `0x0004`; `FUN_1000448B`'s aggregate uses a different assignment. The status is *not* evidence by itself of a server-side authorization decision.
+
+### 6.13 Service-detection investigation and instrumentation caveat
+
+`FUN_10003566` invokes `FUN_100037CA` for up to three names. The latter's API wrappers fit `OpenSCManagerW`, `OpenServiceW`, `QueryServiceStatus`, `CloseServiceHandle`, testing `SERVICE_RUNNING` (state 4). Read-only Frida capture identified these service names and results:
+
+| Service | Original state | Controlled returned state |
+| --- | --- | --- |
+| `WinDefend` | running | reported stopped (patched) |
+| `WdNisSvc` | running | reported stopped (patched) |
+| `Sense` | not running | reported stopped (unchanged) |
+
+With all three calls returning false, `FUN_10003566` returned zero. The decompiled `FUN_1000448B` caller uses `TEST EAX,EAX` at Ghidra `0x10004637`. A brief instruction-level Frida probe captured **full `EAX=0`, `AL=0`** at that point, ruling out the earlier theory that a nonzero upper register caused the unexpected flag. The installer showed an access violation during that instrumented test; **cause not established**, and the short-instruction hook was subsequently removed. Importantly, v7.2's checkpoint demonstrated that the previously active flags were **already set before** all three final checks. The service checks did not explain the persistent flags on this host.
+
+`FUN_100035D5` separately opens an HKLM registry value and searches its lowercase text for the decoded string `enterprise`; it returned false in the captured runs. `FUN_100036CF` also returned false, with its meaning still unclassified.
+
+### 6.14 Registry hash matcher identified: `FUN_100038ED`
+
+The function at Ghidra `0x100038ED` processes every enumerated registry string. `FUN_10003D7B(param_1)` creates a value that is compared with embedded per-category values XOR-decoded using `0x398B439F`. On a match, the routine ORs `1 << category` into `DAT_10118C64` and sets the corresponding individual flag at `DAT_10118C68 + 4*category`. Categories `1`, `4`, and `13` are skipped by this routine. This directly links enumerated registry strings to the two different status representations.
+
+v7.2's read-only checkpoint at the return from `FUN_10003A8D` (after registry collection, before `FUN_100035D5`, `FUN_100036CF`, and `FUN_10003566`) already showed **aggregate `4224` and compact mask `264`** with `DAT_10118C84` and `DAT_10118C98` set. All three subsequent checks returned `0` and did not change that state. Although the individual registry strings causing matches have not been decoded, the source function and timing are now established.
+
+### 6.15 Controlled Frida experiments v6.1–v7.3: patches vs. results
+
+These changes were **research-only, applied within the isolated FLARE-VM** and are not claims about the installer running unmodified. Success of an instrumentation hook does not mean the live server granted a payload.
+
+| Experiment | Client-side observation | Interpretation |
+| --- | --- | --- |
+| v6.1 `--flag-mode zero` | `FUN_100043AF` returned original `264`, effective `0`; final `xn=f` URI still constructed | Override of encoded environment-mask source confirmed |
+| v7 `--upd-status 0` | `UPD|...|4224` was changed to `UPD|...|0`; `P|...|4224` stayed unchanged at default scope | Targeted command-string change confirmed; independent impact on server gate not proven |
+| v7.1 `--env-inventory` | `FUN_1000448B` generated aggregate `4224`, compact mask `264`; two flags set | Baseline provenance confirmed |
+| v7.2 service-result simulation | `WinDefend` and `WdNisSvc` reported stopped; `Sense` already stopped; final three checks all `0`, yet flags unchanged | Flags had been populated earlier during collection |
+| **v7.3 `--registry-mode skip --flag-mode observe`** | `FUN_100038ED` replaced; **868 registry matcher invocations skipped**; aggregate `0`, all 14 flags `0`, native `FUN_100043AF` original return `0` | **Causal validation that the registry-hash matcher set the observed flags** |
+
+The v7.3 result is stronger than post-hoc zeroing: the original mask function naturally returned zero under `observe`, without a forced mask override. The original `4224` also disappeared when the registry matcher stopped setting its bits; independent overrides should not be conflated with this source-level change.
+
+### 6.16 Final HTTP outcome and remaining server-side uncertainty
+
+Fiddler captured the three-request sequence under controlled testing: two `xn=p` requests with 32-character hex responses (the first replayed through Fiddler AutoResponder), followed by the distinct `xn=f` request. After the v7.3 registry bypass, the final response was **HTTP 200 and `Content-Length: 0`** (`server: cloudflare`; `cf-cache-status: DYNAMIC`). Fiddler Classic's Body column briefly showed `-1` while the session updated and ultimately displayed `5`; **the HTTP headers, not that interim UI value, confirm that the server supplied no response body**. There is no evidence a five-byte executable or status token was transferred.
+
+**Confirmed:** locally observed registry-derived status and compact environmental mask were both eliminated without disabling Windows Defender on the VM; request construction continued. **Unconfirmed:** whether the origin server ever delivered a second stage for this campaign, whether `VER|` response state must correlate with later parameters, or whether timing, campaign activation, IP reputation, campaign targeting, or another check controls delivery. Because the first 32-character response was replayed locally, it is especially important not to conflate client validation with an authentic server challenge/authorization exchange. No valid server-delivered second stage has been recovered or executed.
+
+**Next research priority (not performed):** trace how `VER|` response data is stored and consulted before subsequent commands/URI construction, and preserve separate network/Frida traces for baseline and controlled tests. Do not interpret success of the registry-matcher patch as successful remote C2 gating bypass.
+
 ## 7. Detection and hunting opportunities
 
 Defenders can hunt this implementation using a layered approach, prioritizing the precise static constant and supporting code or behavioral context over broad PDF-software indicators.
@@ -366,7 +483,9 @@ Defenders can hunt this implementation using a layered approach, prioritizing th
 | Exact 32-byte constant | High-value static family pivot, especially if combined with decoder seed or PE-mapping code |
 | `0x95000000` / seed bytes | Supporting indicator only; four-byte matches are not specific enough alone |
 | Unusual `is7z.dll` | Compare DLL hashes and code sections to trusted 7-Zip/Inno components, not filename alone |
-| Hidden `LP|`, `RP|` prefixes | Potential decoded-string or memory-hunt pivots; not established network IOCs |
+| Hidden `LP|`, `RP|` prefixes | Decoded command interface observed; these are not network IOCs |
+| Encoded export-name cluster (`cx1`, `cx2`, `cx3`, `ac`, `dc`) | Adjacent records at 12-byte intervals, high-value combination with distinctive 32-byte constant |
+| 4-byte length trailer / synthetic `PG| → LP| → RP|` | Confirmed local loader protocol; not unique enough for standalone network rules |
 | Manual PE mapping operations | Correlate PE-header validation, memory allocation, relocation/import processing and indirect execution |
 | Inno temporary child | Observe `AppPDF_322784.tmp` loading a modified DLL early in process life; generic temp Inno processes are normal |
 | Domain, installer and DLL hashes | Exact-match IOCs for retrospective hunting; use domain context and timestamps |
@@ -388,6 +507,12 @@ rule DragonsGate_7z_SharedConstant_Research {
 
 This is a simple IOC-oriented example, not the user's tested `DragonsGate_SharedConstant_LFSR_Hunt_20261104` rule. It has not been false-positive tested.
 
+#### Additional YARA rule: shared constant + clustered encoded export records
+
+The companion file [`DragonsGate_7z_LFSR_ObfuscatedExports_20261112.yar`](DragonsGate_7z_LFSR_ObfuscatedExports_20261112.yar) contains a **high-specificity research rule** requiring the observed PE header, 32-byte constant, and the five encoded export-name patterns at their **12-byte record spacing**. This spacing is calculated from the five decoded Ghidra addresses above; requiring the byte patterns without adjacency, especially the two-byte pairs, would be too permissive.
+
+This is **not a replacement** for `DragonsGate_SharedConstant_LFSR_Hunt_20261104`. The earlier rule is useful for broader hunting across variants; the new one targets the specific implementation/layout. The new condition has not been independently tested against a large clean software corpus or VirusTotal Retrohunt, and a change to the export interface or layout can cause misses. A hash, file name or a `cx1` string alone is insufficient for attribution.
+
 ### Function / address reference
 
 | Ghidra VA (base 0x10000000) | Role |
@@ -395,7 +520,10 @@ This is a simple IOC-oriented example, not the user's tested `DragonsGate_Shared
 | `0x100049EE` | Hidden command dispatcher |
 | `0x10002CFB` | Read and validate supplied file |
 | `0x10002751` | Copy validated buffer to globals |
-| `0x10002893` | Transformed buffer and staged processing |
+| `0x10002893` | Transformed buffer and staged processing; decoded-length range check |
+| `0x10002E1A` | Four-byte little-endian length trailer validator |
+| `0x1000227B` | Export lookup by name or ordinal on mapped PE |
+| `0x100027D8` / `0x100027A1` | Cached XOR decoder for three- / two-byte expected export names |
 | `0x10002606` | LFSR-style transformation |
 | `0x1000238E` | Wrapper around manual mapper |
 | `0x100023BA` | Manual x86 PE mapping |
@@ -403,19 +531,27 @@ This is a simple IOC-oriented example, not the user's tested `DragonsGate_Shared
 | `0x10004968` | General handler: `VER|` recognition and environment-dependent fallback |
 | `0x1000465D` | Digit-parity response check |
 | `0x1000411C` | Environment check, forced to return false during controlled test |
-| `0x1000448B` | Registry/environment profiling |
+| `0x1000448B` | Registry/environment profiling; collects aggregate status and 14 flags |
+| `0x100038ED` | Registry-string hash matcher; assigns aggregate bits and individual flags |
+| `0x10003D7B` | Per-string hash used by registry matcher |
+| `0x10003A8D` | Registry collection finalization; post-return environment-state checkpoint |
+| `0x10003566` / `0x100037CA` | Service-presence OR test / running-service query |
+| `0x100043AF` | Converts 14 flags to distinct compact environment mask (`264` in baseline) |
+| `0x10005550` | Generates `uu` from random component, environment mask, and embedded identifiers |
+| `0x10005730` / `0x10005E80` | Native `UPD|` URL generator / decoded `xn=f` URI format |
+| `0x10006A40` | Hardcoded final-request `app` / `re` identifier string |
 | `0x10004D1A` | Low-16-bit decimal result formatting |
 | `0x10001E9B` / `0x10001E33` | String stack push / pop |
 | `0x100DA408` | Shared constant data, not executable function |
 
 ## 8. Conclusions and unresolved questions
 
-The CoolPDF installer includes a modified 7-Zip-compatible DLL that contains DragonsGate-related transformation and manual PE-mapping code. Its pre-GUI HTTP response is passed into the DLL as `VER|<token>` and handled by a **confirmed decimal-digit parity gate**. A separate environment-checking function normally returned `true` on the FLARE-VM and led to `invalid_name`; forcing that return to `false` **at runtime** exposed registry profiling, decimal output (`4224`), two additional C2 requests, and a `PG|` attempt to process a zero-byte temporary file.
+The modified `is7z.dll` is a DragonsGate-related loader component with a dynamically observed, pre-GUI server-response path and environmental check. The original observed download path produced an empty staging file; this **does not demonstrate successful server delivery**. Controlled synthetic substitution subsequently proved the `PG| → LP| → RP|` progression without forcing `BAD|0`, established the four-byte trailer, demonstrated the size gate, and traced three LFSR transformations. The v4 decoded-length probe conclusively explained why the inert fixture was rejected before PE mapping.
 
-The third HTTPS request returned HTTP 200 with `Content-Length: 0`. The DLL emitted `BAD|0`; the installer removed its temporary staging file and continued into the ordinary CoolPDF GUI. **No next-stage binary was downloaded or recovered, and no manual PE mapping was observed.** The evidence does not distinguish deliberate server gating from inactive delivery or other conditions, and `PG|` has not been proven to directly invoke the `LP|` / `RP|` loader path.
+Static reversing confirmed a custom x86 PE mapper capable of relocations, import setup, TLS initialization, and DLL entry-point invocation, plus a name/ordinal export resolver and expected multi-stage export interface (`cx1`, `cx2`, `cx3`, `ac`, `dc`). The second mapped PE and exports were **not recovered or executed**. The 13 November tests identified and bypassed the registry-hash matcher that generated the aggregate `4224` and compact mask `264`, but the final response still had no body. The network-side conditions needed for actual payload delivery remain unresolved. Subsequent Fiddler sessions consistently documented the final `xn=f` response as HTTP 200 with `Content-Length: 0`; the UI Body-column value `5` does not establish a five-byte response body. Neither the original run nor controlled registry-bypass runs produced a usable next-stage payload. No downstream infection, persistence, or exfiltration is claimed on the basis of this isolated experiment.
 
-**Final assessment:** Confirmed DragonsGate-related native PE-loader code, local response-parity gate, environment-dependent path and controlled bypass of that path; demonstrated progression into additional network activity and a failed zero-byte file-processing operation. Stage-two delivery and successful execution remain **unconfirmed**.
+**Assessment:** High confidence in the loader's implemented capabilities and confirmed local decoding path; low confidence in the nature of any inaccessible later-stage payload. The newly recovered obfuscated export records provide useful code-reuse evidence and an additional tightly constrained YARA hunting rule, but family classification across all related PDF-themed installers requires corpus-level validation.
 
-Possible follow-up: trace `PG|` file handling to identify exactly why it returns `BAD|0`, or compare behavior against a known valid payload file if one becomes available. Preserve the unmodified run and the patched run separately for reproducibility.
+**Bounded follow-up opportunities:** (1) verify exact LFSR feedback/tap behavior against a known input/output trace rather than rely solely on Ghidra's decompiler; (2) verify/rename mapper helper functions and the export-search comparator; (3) compare the five encoded export records and surrounding code across independently acquired DragonsGate/CookUp DLLs, including benign control samples; (4) run the companion YARA against known-positive samples and a clean corpus / VT Retrohunt; (5) preserve original PCAP, Fiddler responses, Ghidra addresses and synthetic test hashes. Further synthetic-buffer tuning has diminishing investigative value until an authentic, server-delivered blob is obtained.
 
-Prepared from Ghidra decompilation, Frida 17.7.3 logs, Fiddler sessions and FLARE-VM screenshots, 12 November 2026. The testing described here was performed against an isolated research VM with a targeted Frida return-value override; the report does not distribute malware binaries.
+Prepared from Ghidra decompilation, Frida 17.7.3 logs, Fiddler sessions and FLARE-VM screenshots, updated 13 November 2026. Synthetic-file probes were isolated, inert test fixtures, not recovered malware payloads. The packaged update does not distribute malware binaries.
