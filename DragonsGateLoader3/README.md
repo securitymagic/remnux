@@ -5,7 +5,9 @@
 
 > **Earlier update — 12 November 2026 (late analysis):** Additional synthetic-buffer experiments established the `PG| → LP| → RP|` progression without patching `BAD|0`, confirmed the four-byte length trailer and minimum processing size, and observed three LFSR transformations. A read-only Frida probe captured an out-of-range decoded length before PE mapping. Static inspection recovered five short obfuscated *expected exports* (`cx1`, `cx2`, `cx3`, `ac`, `dc`) and established that the DLL includes an in-memory PE export resolver and multi-stage PE mapper. **No real subsequent-stage binary was recovered or executed.**
 
-> **Update — 13 November 2026:** Reconstructed both `xn=p` and `xn=f` native URL templates, the hardcoded `app`/`re` values for the final request, and the random-plus-environment-encoded `uu` field. Frida v7.1–v7.3 experiments identified the origins of the recurring aggregate status `4224` (`0x1080`) and encoded flag mask `264` (`0x0108`). A controlled replacement of the registry hash matcher at `is7z.dll + 0x38ED` suppressed **868 matcher calls** and brought both status values and all 14 underlying flags to zero. The subsequent `xn=f` HTTPS response still had **`Content-Length: 0`**. Thus the observed registry detection is causally responsible for the client flags but has **not** been shown to be the remote payload-delivery gate. No authentic next stage recovered. See §6.11–6.16.
+> **Earlier update — 13 November 2026 (v7.1–v7.3):** Reconstructed both `xn=p` and `xn=f` native URL templates, the hardcoded `app`/`re` values for the final request, and the random-plus-environment-encoded `uu` field. Frida v7.1–v7.3 experiments identified the origins of the recurring aggregate status `4224` (`0x1080`) and encoded flag mask `264` (`0x0108`). A controlled replacement of the registry hash matcher at `is7z.dll + 0x38ED` suppressed **868 matcher calls** and brought both status values and all 14 underlying flags to zero. The subsequent `xn=f` HTTPS response still had **`Content-Length: 0`**. Thus the observed registry detection is causally responsible for the client flags but has **not** been shown to be the remote payload-delivery gate. No authentic next stage recovered. See §6.11–6.16.
+
+> **Latest update — 13 November 2026 (v7.4–v7.5):** Subsequent Frida runs used **unaltered live HTTPS responses** with Fiddler AutoResponder disabled. A targeted in-memory parity patch at `is7z.dll + 0x4968` changed odd-digit-sum `VER|` tokens into passing even-sum tokens; the DLL returned `OK`, and both subsequent requests were reached. One test with registry checks skipped yielded an encoded environment mask of `0x0000`; a comparative run with registry collection enabled yielded `0x0108`. The `uu` field was decoded and validated against both values. A separate v7.5 hook for the **second** `xn=p` response intercepted the response but had no change to make (its digit sum was already even). The final `xn=f` response remained **HTTP 200, `Content-Length: 0`** in the observed trials. No authentic second stage was recovered. See §6.17–6.20.
 
 ## 1. Executive summary
 
@@ -15,7 +17,7 @@ A signed PDF utility installer distributing **CoolPDF 2.1.1.0** contains a modif
 
 Static analysis also exposed XOR-obfuscated `LP|` and `RP|` command prefixes. The former invokes a file-loading routine with a custom four-byte length trailer; the latter leads to the staged processing routine containing the PE mapper. The installer was observed contacting `innodocumentsetup.com` before its welcome GUI. Early-child instrumentation and a controlled environment-check bypass reached a second and third HTTP request. The natural response left a zero-byte temporary file and `PG|` failed; controlled synthetic-file substitution later demonstrated successful `PG|` and `LP|`, followed by `RP|` and three LFSR calls. The synthetic data failed its decoded-length validation, so manual PE mapping was not dynamically reached.
 
-**Scope / confidence:** High confidence that this DLL contains a DragonsGate-related loader implementation; **not** a confirmed successful infection chain or recovered second-stage payload. The first response’s digit-parity check is confirmed, but the server-side decision to deliver a payload and successful next-stage execution remain unproven.
+**Scope / confidence:** High confidence that this DLL contains a DragonsGate-related loader implementation; **not** a confirmed successful infection chain or recovered second-stage payload. The first response’s digit-parity check and a working **local Frida parity bypass** are confirmed by live-response traces. A further local bypass did not cause the server to deliver a payload; the server-side criteria and successful next-stage execution remain unproven.
 
 ## 2. Sample details and indicators
 
@@ -452,7 +454,7 @@ The function at Ghidra `0x100038ED` processes every enumerated registry string. 
 
 v7.2's read-only checkpoint at the return from `FUN_10003A8D` (after registry collection, before `FUN_100035D5`, `FUN_100036CF`, and `FUN_10003566`) already showed **aggregate `4224` and compact mask `264`** with `DAT_10118C84` and `DAT_10118C98` set. All three subsequent checks returned `0` and did not change that state. Although the individual registry strings causing matches have not been decoded, the source function and timing are now established.
 
-### 6.15 Controlled Frida experiments v6.1–v7.3: patches vs. results
+### 6.15 Controlled Frida experiments v6.1–v7.5: patches vs. results
 
 These changes were **research-only, applied within the isolated FLARE-VM** and are not claims about the installer running unmodified. Success of an instrumentation hook does not mean the live server granted a payload.
 
@@ -463,6 +465,9 @@ These changes were **research-only, applied within the isolated FLARE-VM** and a
 | v7.1 `--env-inventory` | `FUN_1000448B` generated aggregate `4224`, compact mask `264`; two flags set | Baseline provenance confirmed |
 | v7.2 service-result simulation | `WinDefend` and `WdNisSvc` reported stopped; `Sense` already stopped; final three checks all `0`, yet flags unchanged | Flags had been populated earlier during collection |
 | **v7.3 `--registry-mode skip --flag-mode observe`** | `FUN_100038ED` replaced; **868 registry matcher invocations skipped**; aggregate `0`, all 14 flags `0`, native `FUN_100043AF` original return `0` | **Causal validation that the registry-hash matcher set the observed flags** |
+| **v7.4 `--ver-parity-fix`** | Hook at `is7z.dll + 0x4968` modified the first *live* 32-character token in the DLL, rather than substituting its HTTP response through Fiddler; observed `VER|` result `OK` | Bypassed local first-response validation while preserving the authentic server response on the wire |
+| **v7.4 registry `observe` comparison** | Natural compact mask `0x0108` and aggregate `0x1080` observed; final `xn=f` still had empty response | Restoring two previously detected registry flags did not yield a payload |
+| **v7.5 `--all-bypasses` / second response patch** | Separate `WinHttpReadData` hook identified the second `xn=p` 32-byte response; in captured run its digit sum was 98 (even), so it remained unchanged | Hook interception demonstrated, but no actual second-token parity modification was tested in this run; no delivery change |
 
 The v7.3 result is stronger than post-hoc zeroing: the original mask function naturally returned zero under `observe`, without a forced mask override. The original `4224` also disappeared when the registry matcher stopped setting its bits; independent overrides should not be conflated with this source-level change.
 
@@ -472,7 +477,61 @@ Fiddler captured the three-request sequence under controlled testing: two `xn=p`
 
 **Confirmed:** locally observed registry-derived status and compact environmental mask were both eliminated without disabling Windows Defender on the VM; request construction continued. **Unconfirmed:** whether the origin server ever delivered a second stage for this campaign, whether `VER|` response state must correlate with later parameters, or whether timing, campaign activation, IP reputation, campaign targeting, or another check controls delivery. Because the first 32-character response was replayed locally, it is especially important not to conflate client validation with an authentic server challenge/authorization exchange. No valid server-delivered second stage has been recovered or executed.
 
-**Next research priority (not performed):** trace how `VER|` response data is stored and consulted before subsequent commands/URI construction, and preserve separate network/Frida traces for baseline and controlled tests. Do not interpret success of the registry-matcher patch as successful remote C2 gating bypass.
+**Earlier research limitation (now partially addressed in §6.17–6.20):** v7.3 relied on Fiddler AutoResponder to advance the first gate. v7.4 later demonstrated passage using the real server response with a local Frida `VER|` patch. These are distinct tests, and neither is evidence that the remote server authorized payload delivery.
+
+### 6.17 Live `VER|` parity correction without Fiddler AutoResponder (v7.4)
+
+To remove a confounding factor in earlier network tests, the analyst **disabled Fiddler AutoResponder** and allowed the installer to receive the authentic 32-character first `xn=p` response from `innodocumentsetup.com`. Frida v7.4 hooked the DLL's general handler (`FUN_10004968`, RVA `0x4968`) and modified the `VER|` token **only inside the running process**, leaving the actual HTTP transaction unchanged. The hook corrects a nonzero odd decimal-digit sum to an even sum by changing one digit; it does not decrypt or authenticate the token.
+
+The observed live response / local-effect pairs were:
+
+| Run | Authentic first `xn=p` response | Digit sum | Token passed into local validation | Effective sum | Result |
+| --- | --- | ---: | --- | ---: | --- |
+| v7.4 registry skipped | `BBEFF08D5A8C71A4B2A1E2940826A071` | 75 | `BBEFF18D5A8C71A4B2A1E2940826A071` | 76 | `OK` |
+| v7.4 registry observed | `2178F13547C380B02EACA3A137860563` | 93 | `3178F13547C380B02EACA3A137860563` | 94 | `OK` |
+| v7.5 all bypasses | `0A4FFA9E8C933B6D06423AF2AA99D00F` | 77 | `1A4FFA9E8C933B6D06423AF2AA99D00F` | 78 | `OK` |
+
+The Frida `ver_parity` event recorded `originalToken`, `effectiveToken`, `digitSumOriginal`, `digitSumEffective` and `changed: true`. The DLL's message sink then emitted `OK`. Earlier unmodified live samples such as `55C15CAAABD784B5D4655A193E3670FF` (digit sum 89) failed the same odd-parity criterion. **This demonstrates a client-side bypass of the initial check, not a server-authorized response.** In these runs, the installer reached the second `xn=p` and final `xn=f` requests without HTTP response replacement by Fiddler.
+
+### 6.18 `uu` obfuscation reversed and validated using two environment masks
+
+Native analysis of `FUN_10005550` and the final-request fixed identifier `98e71c7b0e5c0bf5` yielded an explicit relationship between the eight hex characters of the final request's `uu` field and the 16-bit environment mask:
+
+```text
+uu = RRRRCCCC
+CCCC = RRRR XOR EEEE XOR 2802
+EEEE = RRRR XOR CCCC XOR 2802
+```
+
+Here `RRRR` is the four-character random portion, `CCCC` the calculated portion, `EEEE` the environmental mask, and `0x2802` the fixed XOR contribution for **this** final-request identifier. This constant should **not** be generalized to unrelated identifiers or DragonsGate variants.
+
+| Frida mode / run | Final `uu` | Decode | Environment mask | Final response |
+| --- | --- | --- | --- | --- |
+| v7.4 registry `skip`, mask `observe` | `dad9f2db` | `DAD9 XOR F2DB XOR 2802` | `0x0000` | HTTP 200, `Content-Length: 0` |
+| v7.4 registry `observe`, mask `observe` | `d78dfe87` | `D78D XOR FE87 XOR 2802` | `0x0108` | HTTP 200, `Content-Length: 0` |
+| v7.5 all bypasses, mask forced `zero` | `7ffe57fc` | `7FFE XOR 57FC XOR 2802` | `0x0000` | HTTP 200, `Content-Length: 0` |
+
+The v7.4 registry-observe trace independently recorded aggregate `4224` (`0x1080`), active flags `DAT_10118C84` and `DAT_10118C98`, and compact mask `0x0108`. The registry-skip trace recorded zeroed flags and a native compact mask of zero. Thus the URI decoder matches observed runtime behavior; **it does not identify what conditions the remote endpoint actually uses to select payload recipients**. The experimental runs still included the `--env-bypass` branch override and service-state instrumentation, so the registry-observe run was *not* an untouched host baseline.
+
+### 6.19 Second `xn=p` response and dual-parity experiment (v7.5)
+
+The compiled Inno Pascal Script's `SENDINSTALLSTART` path downloads the second `xn=p` response into `is7z.tmp`; the available script analysis does **not** show that response subsequently being passed to `VER|` or otherwise consumed before final-request construction. To test its possible significance anyway, Frida v7.5 introduced a separate `WinHttpReadData` hook scoped to the **second** `xn=p` request handle and a `--second-parity-fix` option. The `--all-bypasses` preset enabled both parity hooks and previously studied environment/registry bypasses; the known in-memory mapper guard remained enabled by default unless `--allow-payload-execution` was added.
+
+In the v7.5 capture, the second live token was:
+
+```text
+75C4A5C3835066412F6E51DAF8CEE379
+```
+
+The hook's `second_parity` event reported **digit sum 98 → 98, `changed: false`**, because this token already met the even-parity criterion. Thus the hook's *observation and selection of the second response* were demonstrated, **but this particular run did not test a changed second token**. Despite enabling the existing local bypasses and the second hook, the final `xn=f` response remained empty. It would overstate the finding to claim a modified second token was proven ineffective; it was not modified in the captured run.
+
+The final request was generated after the first `VER|` correction and followed by a `PG|<temporary path>` validation attempt that produced `BAD|0` on an empty/invalid downloaded file. No genuine payload was transferred to `LP|`/`RP|`, and no mapped second-stage PE was observed. One v7.5 run explicitly used `--allow-payload-execution`, which **disabled the known PE-mapper guard**; this had no observed execution consequence because no valid stage was delivered. The guard is limited to that mapped path, not a universal malware-execution containment mechanism.
+
+### 6.20 Interpretation: server-side delivery remains unobserved
+
+The expanded tests establish that the first response's parity gate can be bypassed locally **while retaining the genuine HTTPS exchange**, and that a subsequent final download request can be generated both with a naturally observed `0x0108` mask and with a zero mask. In all captured comparisons, the final response was **HTTP 200 with `Content-Length: 0`**. Fiddler's Body-column display of `5` does not override that wire-level content length. The repeated first responses with odd sums are *consistent with* deliberate rejection signaling, but the server's implementation is unavailable and this interpretation is not demonstrated. Likewise, it is unknown whether request timing, campaign activation, source IP, or other server-side state determines eligibility.
+
+The analyst reports that **no successful second-stage delivery has been reported within the collaborating research community to date**; this is an observation about the current investigation, not evidence that no infections have ever occurred. The embedded PE mapper and expected exports remain real code capabilities, but the second-stage payload, its behavior and its delivery criteria remain unconfirmed. Further repetitive environment-mask or parity-bypass runs alone are unlikely to resolve the server-side decision.
 
 ## 7. Detection and hunting opportunities
 
@@ -537,7 +596,7 @@ This is **not a replacement** for `DragonsGate_SharedConstant_LFSR_Hunt_20261104
 | `0x10003A8D` | Registry collection finalization; post-return environment-state checkpoint |
 | `0x10003566` / `0x100037CA` | Service-presence OR test / running-service query |
 | `0x100043AF` | Converts 14 flags to distinct compact environment mask (`264` in baseline) |
-| `0x10005550` | Generates `uu` from random component, environment mask, and embedded identifiers |
+| `0x10005550` | Generates `uu` from random component, environment mask, and embedded identifiers; `EEEE = RRRR XOR CCCC XOR 0x2802` for this final selector |
 | `0x10005730` / `0x10005E80` | Native `UPD|` URL generator / decoded `xn=f` URI format |
 | `0x10006A40` | Hardcoded final-request `app` / `re` identifier string |
 | `0x10004D1A` | Low-16-bit decimal result formatting |
@@ -548,9 +607,9 @@ This is **not a replacement** for `DragonsGate_SharedConstant_LFSR_Hunt_20261104
 
 The modified `is7z.dll` is a DragonsGate-related loader component with a dynamically observed, pre-GUI server-response path and environmental check. The original observed download path produced an empty staging file; this **does not demonstrate successful server delivery**. Controlled synthetic substitution subsequently proved the `PG| → LP| → RP|` progression without forcing `BAD|0`, established the four-byte trailer, demonstrated the size gate, and traced three LFSR transformations. The v4 decoded-length probe conclusively explained why the inert fixture was rejected before PE mapping.
 
-Static reversing confirmed a custom x86 PE mapper capable of relocations, import setup, TLS initialization, and DLL entry-point invocation, plus a name/ordinal export resolver and expected multi-stage export interface (`cx1`, `cx2`, `cx3`, `ac`, `dc`). The second mapped PE and exports were **not recovered or executed**. The 13 November tests identified and bypassed the registry-hash matcher that generated the aggregate `4224` and compact mask `264`, but the final response still had no body. The network-side conditions needed for actual payload delivery remain unresolved. Subsequent Fiddler sessions consistently documented the final `xn=f` response as HTTP 200 with `Content-Length: 0`; the UI Body-column value `5` does not establish a five-byte response body. Neither the original run nor controlled registry-bypass runs produced a usable next-stage payload. No downstream infection, persistence, or exfiltration is claimed on the basis of this isolated experiment.
+Static reversing confirmed a custom x86 PE mapper capable of relocations, import setup, TLS initialization, and DLL entry-point invocation, plus a name/ordinal export resolver and expected multi-stage export interface (`cx1`, `cx2`, `cx3`, `ac`, `dc`). The second mapped PE and exports were **not recovered or executed**. The 13 November tests identified and bypassed the registry-hash matcher that generated the aggregate `4224` and compact mask `264`; subsequent v7.4–v7.5 trials corrected live first-response parity within Frida, confirmed `uu` decoding for both `0x0000` and `0x0108` masks, and scoped a separate hook to the second `xn=p` response. None caused the server to deliver a payload. The network-side conditions needed for actual payload delivery remain unresolved. No successful second-stage delivery has been observed by the analyst or reported within their collaborating research group. Subsequent Fiddler sessions consistently documented the final `xn=f` response as HTTP 200 with `Content-Length: 0`; the UI Body-column value `5` does not establish a five-byte response body. Neither the original run nor controlled registry-bypass runs produced a usable next-stage payload. No downstream infection, persistence, or exfiltration is claimed on the basis of this isolated experiment.
 
-**Assessment:** High confidence in the loader's implemented capabilities and confirmed local decoding path; low confidence in the nature of any inaccessible later-stage payload. The newly recovered obfuscated export records provide useful code-reuse evidence and an additional tightly constrained YARA hunting rule, but family classification across all related PDF-themed installers requires corpus-level validation.
+**Assessment:** High confidence in the loader's implemented capabilities, local `VER|` parity behavior/bypass, and `uu` field encoding; low confidence in the nature of any inaccessible later-stage payload. The newly recovered obfuscated export records provide useful code-reuse evidence and an additional tightly constrained YARA hunting rule, but family classification across all related PDF-themed installers requires corpus-level validation.
 
 **Bounded follow-up opportunities:** (1) verify exact LFSR feedback/tap behavior against a known input/output trace rather than rely solely on Ghidra's decompiler; (2) verify/rename mapper helper functions and the export-search comparator; (3) compare the five encoded export records and surrounding code across independently acquired DragonsGate/CookUp DLLs, including benign control samples; (4) run the companion YARA against known-positive samples and a clean corpus / VT Retrohunt; (5) preserve original PCAP, Fiddler responses, Ghidra addresses and synthetic test hashes. Further synthetic-buffer tuning has diminishing investigative value until an authentic, server-delivered blob is obtained.
 
