@@ -9,6 +9,8 @@
 
 > **Latest update — 13 November 2026 (v7.4–v7.5):** Subsequent Frida runs used **unaltered live HTTPS responses** with Fiddler AutoResponder disabled. A targeted in-memory parity patch at `is7z.dll + 0x4968` changed odd-digit-sum `VER|` tokens into passing even-sum tokens; the DLL returned `OK`, and both subsequent requests were reached. One test with registry checks skipped yielded an encoded environment mask of `0x0000`; a comparative run with registry collection enabled yielded `0x0108`. The `uu` field was decoded and validated against both values. A separate v7.5 hook for the **second** `xn=p` response intercepted the response but had no change to make (its digit sum was already even). The final `xn=f` response remained **HTTP 200, `Content-Length: 0`** in the observed trials. No authentic second stage was recovered. See §6.17–6.20.
 
+> **Additional static analysis — 13 November 2026 (XOR inventory and mapped-stage interfaces):** An offline scanner using the repeated per-character XOR progression `0xA7 + i` recovered hidden registry paths, anti-analysis and WinINet API identifiers, command prefixes and the five expected mapped-stage exports from `is7z.dll`. Full `FUN_10002893` decompilation plus x86 call-site assembly established the `cx1` four-argument `__cdecl` interface and the subsequent `ac`/`cx2` and `dc`/`cx3` call contracts. The tick-derived value returned through `ENCTICK|` is also generated and supplied to later mapped stages. A separate ClipVault `nsisunz.dll` exhibited extensive overlap in encoded strings, supporting shared implementation/code reuse **without establishing chronology, shared operators, or identical payloads**. See §6.21–6.23.
+
 ## 1. Executive summary
 
 A signed PDF utility installer distributing **CoolPDF 2.1.1.0** contains a modified `is7z.dll` component that preserves expected 7-Zip exports while incorporating code for data transformation, command dispatch, and in-memory PE loading.
@@ -16,6 +18,8 @@ A signed PDF utility installer distributing **CoolPDF 2.1.1.0** contains a modif
 **Principal finding:** The extracted DLL matches a custom DragonsGate YARA hunt on a distinctive 32-byte constant and LFSR-seed indicator. Ghidra confirms executable code copies that exact constant, applies a bitwise LFSR-style transformation, and provides a manual mapper for 32-bit PE files. This is stronger than a static string match alone.
 
 Static analysis also exposed XOR-obfuscated `LP|` and `RP|` command prefixes. The former invokes a file-loading routine with a custom four-byte length trailer; the latter leads to the staged processing routine containing the PE mapper. The installer was observed contacting `innodocumentsetup.com` before its welcome GUI. Early-child instrumentation and a controlled environment-check bypass reached a second and third HTTP request. The natural response left a zero-byte temporary file and `PG|` failed; controlled synthetic-file substitution later demonstrated successful `PG|` and `LP|`, followed by `RP|` and three LFSR calls. The synthetic data failed its decoded-length validation, so manual PE mapping was not dynamically reached.
+
+The mapped-stage interface has now been characterized further: `cx1` receives the original staged buffer and yields another PE buffer; subsequent mapped images are expected to implement `ac`/`cx2` and `dc`/`cx3`. Their exports have not been observed executing because the live server has delivered no usable payload.
 
 **Scope / confidence:** High confidence that this DLL contains a DragonsGate-related loader implementation; **not** a confirmed successful infection chain or recovered second-stage payload. The first response’s digit-parity check and a working **local Frida parity bypass** are confirmed by live-response traces. A further local bypass did not cause the server to deliver a payload; the server-side criteria and successful next-stage execution remain unproven.
 
@@ -533,6 +537,64 @@ The expanded tests establish that the first response's parity gate can be bypass
 
 The analyst reports that **no successful second-stage delivery has been reported within the collaborating research community to date**; this is an observation about the current investigation, not evidence that no infections have ever occurred. The embedded PE mapper and expected exports remain real code capabilities, but the second-stage payload, its behavior and its delivery criteria remain unconfirmed. Further repetitive environment-mask or parity-bypass runs alone are unlikely to resolve the server-side decision.
 
+### 6.21 Offline XOR decoding and recovered string inventory (13 November)
+
+Ghidra confirmed a recurring *position-dependent* XOR decoder for multiple independently referenced strings. For each encoded string, character index `i` resets to zero, and the operation is `decoded[i] = encoded[i] XOR (0xA7 + i)` (character arithmetic as used in the native routines). Implementations decode either one-byte ASCII buffers or 16-bit Unicode units, store the plaintext in adjacent writable space and set a one-time initialization flag. **This is not a fixed single-byte XOR key and is not proof that every string or URI in the DLL uses this scheme.**
+
+A standalone, non-executing Python scanner run against extracted `is7z.dll` reported **65 candidate strings across five sections** using its normal `--both` mode. Broadening the scan with `--min-len 4 --all-sections` returned **12,765 heuristic candidates across six sections**, many obviously incidental printable patterns. The following are selected recognizable results from the focused scan; virtual addresses assume the Ghidra base `0x10000000`. They are **locally decoded embedded strings, not necessarily network transmissions or behaviors dynamically observed**.
+
+| Ghidra VA | Recovered plaintext | Context |
+| --- | --- | --- |
+| `0x100F7020` / `0x100F702C` / `0x100F7038` | `cx1` / `cx2` / `cx3` | Three-byte encoded expected PE exports; 12-byte record spacing |
+| `0x100F7044` / `0x100F7050` | `ac` / `dc` | Two-byte encoded expected exports in same cluster |
+| `0x100F7060` | `CoolPDF;PDF;\AppData\Roaming\;/verysilent` | 41-character configuration-like string passed to the preferred mapped-stage exports; ultimate interpretation not established |
+| `0x100F7100` | `SOFTWARE\Microsoft\Windows Defender` | Defender registry path |
+| `0x100F7198` | `SOFTWARE\Policies\Microsoft\Windows Defender` | Defender policy registry path |
+| `0x100F7250` | `SOFTWARE\Microsoft\Windows Defender\MpEngine` | Defender engine registry path |
+| `0x100F7308` | `SOFTWARE\Policies\Microsoft\Windows Defender\MpEngine` | Defender engine policy registry path |
+| `0x100F73E4` / `0x100F7420` | `PUAProtection` / `MpEnablePus` | Defender configuration value names referenced by `FUN_100036CF` |
+| `0x100F7454` / `0x100F7480` | `WinDefend` / `WdNisSvc` | Windows Defender-related service names |
+| `0x100F74C8` | `SOFTWARE\Microsoft\Windows NT\CurrentVersion` | OS / registry inventory path |
+| `0x100F75B4` / `0x100F7580` | `enterprise` / `ProductName` | Registry comparison / product identification |
+| `0x100F7658` / `0x100F761C` | `GetProcessImageFileNameW` / `K32GetProcessImageFileNameW` | Process-name retrieval APIs |
+| `0x100F7690` | `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` | Installed-application registry inventory |
+| `0x100F7768` | `SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall` | 32-bit software inventory registry path |
+| `0x100F79B0` | `ENCTICK|` | Internal command prefix; see §6.22 |
+| `0x100F7A9C` / `0x100F7AD4` / `0x100F7AB8` | `wininet.dll` / `advapi32.dll` / `shell32.dll` | Dynamically referenced library names |
+| `0x100F7B3C` / `0x100F7B98` | `HttpOpenRequestA` / `HttpSendRequestA` | Network APIs |
+| `0x100F7BC0` / `0x100F7BEC` | `InternetCloseHandle` / `ShellExecuteExW` | Handle cleanup / possible process launch |
+| `0x100F7C38` / `0x100F7C58` / `0x100F7C9C` | `RegOpenKeyExW` / `RegQueryValueExW` / `RegEnumKeyExW` | Registry API lookup |
+| `0x100F7CE0` / `0x100F7D78` | `EnumServicesStatusW` / `QueryServiceStatus` | Service inspection |
+| `0x100F7DC8` | `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz` | Alphabet / formatting table, role not established |
+
+`FUN_100036CF` initializes four Defender-related paths, tests `PUAProtection` across two, then `MpEnablePus` across two others, via `FUN_100039AB`. Its decompilation tests `(return != 0 && value != 0 && value != 2)` to return `1`. **The exact meaning of `FUN_100039AB`'s return and output still requires inspecting that helper; the condition should not yet be paraphrased as a specific Defender on/off state.** Earlier instrumented runs returned `0` for `FUN_100036CF`.
+
+The five expected-export records are adjacent, with encoded bytes `C4 D0 98`, `C4 D0 9B`, `C4 D0 9A`, `C6 CB`, `C3 CB` at offsets `+0x00`, `+0x0C`, `+0x18`, `+0x24`, `+0x30`. Each starts in a zero-padded 12-byte slot. This exact structure is useful as an **implementation-specific** detection pivot, but the record format may differ in other builds. Matching the five short tokens alone is not a validated low-false-positive family signature.
+
+### 6.22 `ENCTICK|` and confirmed internal mapped-stage call contracts
+
+`FUN_10004DFB` lazily decodes the UTF-16 command prefix `ENCTICK|`. `FUN_100049EE` tests it as an eight-character prefix and calls `FUN_10002874`, which simply calls `FUN_100026A1` and reports whether its output buffer is nonempty. `FUN_100026A1` obtains `GetTickCount()` and `GetCurrentProcessId()`, seeds its pseudorandom generator with **`PID XOR tick count`**, reverses the decimal tick-count digits and interleaves each digit with a pseudorandom decimal digit. This is a locally generated **tick-derived string, not evidence of cryptographic randomness or C2 challenge response**. A separate seven-character exact-match dispatcher condition also leads to the same generator; that command was not decoded in this analysis.
+
+Full decompilation of `FUN_10002893` and x86 assembly around `0x100029A4`–`0x10002A52` establish the intended transitions:
+
+| Mapped image / entry point | Confirmed arguments / output | Next transition |
+| --- | --- | --- |
+| **Initial decoded PE, `cx1`** | `cx1(DAT_10118C5C, DAT_10118C60, &outputBuffer, &outputSize)`; returns nonzero on success, with valid pointer and nonzero length. `CALL EAX` followed by `ADD ESP,0x10` confirms four caller-cleanup arguments (`__cdecl`-compatible). | Loader copies the returned bytes to heap memory, frees the first mapped PE, manually maps the returned image, then frees its temporary copy. |
+| **Second mapped PE, `ac` (preferred)** | `ac(originalBuffer, originalSize, param_1, &nextBuffer, &nextSize, scratchA, scratchB, tickString, param_3, decodedConfig)` | On nonzero return with nonempty output, copies and manually maps a third PE. |
+| **Second mapped PE, `cx2` (fallback)** | `cx2(originalBuffer, originalSize, param_1, &nextBuffer, &nextSize, scratchA, scratchB, tickString)` | Same next-buffer checks and mapping operation. |
+| **Third mapped PE, `dc` (preferred)** | `dc(param_1, scratchA, scratchB, 0, freshTickString, param_3, decodedConfig)` | Final indirect export invocation; its return value becomes the loader routine's result. |
+| **Third mapped PE, `cx3` (fallback)** | `cx3(param_1, scratchA, scratchB, 0, freshTickString)` | Final indirect export invocation. |
+
+`decodedConfig` is returned by `FUN_1000280F` and corresponds to the embedded `CoolPDF;PDF;\AppData\Roaming\;/verysilent` string. `tickString` and `freshTickString` are separately generated through `FUN_100026A1` before the second and third calls. The code **prefers `ac` over `cx2` and `dc` over `cx3` when both are exported**; the extra arguments may indicate interface variants, but compatibility/version history is unproven.
+
+The first embedded image is obtained from the transformed working buffer: a DWORD at `+0x40` supplies the decoded size, subject to `0x10000 < size < workingSize - 0x44`, and the image bytes begin at `+0x44`. Mapping and invoking its `cx1` export is the first executable stage in this modeled chain. Subsequent images are **provided by the earlier mapped stage, not separately observed network downloads**. Their underlying data transformations and actual behavior remain unknown without a genuine server-provided blob. **No authentic mapped stage was reached dynamically in this investigation.**
+
+### 6.23 Cross-installer code reuse: ClipVault `nsisunz.dll` comparison
+
+Running the same offline XOR scanner against a separately acquired ClipVault NSIS plugin DLL (`nsisunz.dll`) returned **73 focused candidates across five sections**. The two DLLs encode the same Defender paths and PUA value names, software-inventory paths, selected WinINet / registry / service API names, `invalid_name`, `ENCTICK|`, and the identical `0xA7 + i` decoding scheme. This combination **strongly supports common code, a shared source component, or a reused framework** across distinct installer-plugin containers (modified 7-Zip versus NSIS Unz).
+
+Some strings are *not* shared or were not detected by the same scanner configuration: the current `is7z.dll` exposed `cx1` / `cx2` / `cx3` / `ac` / `dc`, whereas those names were **not recovered** in the posted ClipVault scanner output. ClipVault showed `/?%s=%.8s&%s=%.8s&init=prep`, `...&init=fin`, and additional commands including `PAYLOAD|FETCH|`, `VERIFYFILE|`, `GUIDCHECK|`, and `HTTPGET|`; the current CoolPDF implementation instead uses `xn=p` and `xn=f`. **Neither sample has been shown to be older than the other**, and these common strings do not prove shared operators, matching delivered stages, or identical command implementations. The ClipVault comparison is a *code-reuse lead*, not a completed binary diff or family attribution.
+
 ## 7. Detection and hunting opportunities
 
 Defenders can hunt this implementation using a layered approach, prioritizing the precise static constant and supporting code or behavioral context over broad PDF-software indicators.
@@ -542,7 +604,8 @@ Defenders can hunt this implementation using a layered approach, prioritizing th
 | Exact 32-byte constant | High-value static family pivot, especially if combined with decoder seed or PE-mapping code |
 | `0x95000000` / seed bytes | Supporting indicator only; four-byte matches are not specific enough alone |
 | Unusual `is7z.dll` | Compare DLL hashes and code sections to trusted 7-Zip/Inno components, not filename alone |
-| Hidden `LP|`, `RP|` prefixes | Decoded command interface observed; these are not network IOCs |
+| Hidden `LP|`, `RP|`, `ENCTICK|` prefixes | Decoded command interface; `ENCTICK|` generates a tick-derived string used again inside the mapped-stage pipeline |
+| Reused `0xA7 + i` encoded string inventory | Shared Defender, WinINet, registry and internal-command encodings across CoolPDF and ClipVault DLLs; independent code-reuse pivot, subject to clean-corpus testing |
 | Encoded export-name cluster (`cx1`, `cx2`, `cx3`, `ac`, `dc`) | Adjacent records at 12-byte intervals, high-value combination with distinctive 32-byte constant |
 | 4-byte length trailer / synthetic `PG| → LP| → RP|` | Confirmed local loader protocol; not unique enough for standalone network rules |
 | Manual PE mapping operations | Correlate PE-header validation, memory allocation, relocation/import processing and indirect execution |
@@ -566,9 +629,11 @@ rule DragonsGate_7z_SharedConstant_Research {
 
 This is a simple IOC-oriented example, not the user's tested `DragonsGate_SharedConstant_LFSR_Hunt_20261104` rule. It has not been false-positive tested.
 
-#### Additional YARA rule: shared constant + clustered encoded export records
+#### Historical companion YARA: shared constant + clustered encoded export records
 
-The companion file [`DragonsGate_7z_LFSR_ObfuscatedExports_20261112.yar`](DragonsGate_7z_LFSR_ObfuscatedExports_20261112.yar) contains a **high-specificity research rule** requiring the observed PE header, 32-byte constant, and the five encoded export-name patterns at their **12-byte record spacing**. This spacing is calculated from the five decoded Ghidra addresses above; requiring the byte patterns without adjacency, especially the two-byte pairs, would be too permissive.
+The previously produced companion file [`DragonsGate_7z_LFSR_ObfuscatedExports_20261112.yar`](DragonsGate_7z_LFSR_ObfuscatedExports_20261112.yar) contains a **high-specificity research rule** requiring the observed PE header, 32-byte constant, and the five encoded export-name patterns at their **12-byte record spacing**. This spacing is calculated from the five decoded Ghidra addresses above; requiring the byte patterns without adjacency, especially the two-byte pairs, would be too permissive.
+
+**Research reassessment (13 November):** This companion duplicates the already-working shared-constant detection and adds an implementation-specific export cluster; it has **not** established additional cross-variant detection value. It is retained as historical research, not recommended as a superior replacement. A future independent rule could test proximity of multiple shared XOR-encoded strings, but it must be validated against both known-positive and clean samples before publication.
 
 This is **not a replacement** for `DragonsGate_SharedConstant_LFSR_Hunt_20261104`. The earlier rule is useful for broader hunting across variants; the new one targets the specific implementation/layout. The new condition has not been independently tested against a large clean software corpus or VirusTotal Retrohunt, and a change to the export interface or layout can cause misses. A hash, file name or a `cx1` string alone is insufficient for attribution.
 
@@ -579,7 +644,11 @@ This is **not a replacement** for `DragonsGate_SharedConstant_LFSR_Hunt_20261104
 | `0x100049EE` | Hidden command dispatcher |
 | `0x10002CFB` | Read and validate supplied file |
 | `0x10002751` | Copy validated buffer to globals |
-| `0x10002893` | Transformed buffer and staged processing; decoded-length range check |
+| `0x10002893` | Three-mapped-image workflow: decoded-length check, `cx1`, then `ac`/`cx2`, then `dc`/`cx3` |
+| `0x100026A1` / `0x10002874` | Tick-derived string generator / nonempty-output wrapper used in `ENCTICK|` and mapped-stage calls |
+| `0x1000280F` | Decodes 41-character CoolPDF configuration-like string passed to preferred stage exports |
+| `0x10004DFB` | Lazily decodes `ENCTICK|` prefix |
+| `0x100036CF` / `0x100039AB` | Defender PUA configuration probe / registry-value query helper (return semantics incompletely classified) |
 | `0x10002E1A` | Four-byte little-endian length trailer validator |
 | `0x1000227B` | Export lookup by name or ordinal on mapped PE |
 | `0x100027D8` / `0x100027A1` | Cached XOR decoder for three- / two-byte expected export names |
@@ -609,8 +678,10 @@ The modified `is7z.dll` is a DragonsGate-related loader component with a dynamic
 
 Static reversing confirmed a custom x86 PE mapper capable of relocations, import setup, TLS initialization, and DLL entry-point invocation, plus a name/ordinal export resolver and expected multi-stage export interface (`cx1`, `cx2`, `cx3`, `ac`, `dc`). The second mapped PE and exports were **not recovered or executed**. The 13 November tests identified and bypassed the registry-hash matcher that generated the aggregate `4224` and compact mask `264`; subsequent v7.4–v7.5 trials corrected live first-response parity within Frida, confirmed `uu` decoding for both `0x0000` and `0x0108` masks, and scoped a separate hook to the second `xn=p` response. None caused the server to deliver a payload. The network-side conditions needed for actual payload delivery remain unresolved. No successful second-stage delivery has been observed by the analyst or reported within their collaborating research group. Subsequent Fiddler sessions consistently documented the final `xn=f` response as HTTP 200 with `Content-Length: 0`; the UI Body-column value `5` does not establish a five-byte response body. Neither the original run nor controlled registry-bypass runs produced a usable next-stage payload. No downstream infection, persistence, or exfiltration is claimed on the basis of this isolated experiment.
 
+**Additional static findings (13 November):** A read-only XOR scanner recovered a structured set of encoded Defender/service/registry strings, network API names, command prefixes, and five export identifiers. Full `FUN_10002893` code and x86 call-site assembly clarified the first-stage `cx1` calling convention, the second and third mapped-image interfaces, and the participation of tick-derived strings. Similar encoded string inventories in ClipVault `nsisunz.dll` support code reuse; no build chronology or common downstream payload is inferred.
+
 **Assessment:** High confidence in the loader's implemented capabilities, local `VER|` parity behavior/bypass, and `uu` field encoding; low confidence in the nature of any inaccessible later-stage payload. The newly recovered obfuscated export records provide useful code-reuse evidence and an additional tightly constrained YARA hunting rule, but family classification across all related PDF-themed installers requires corpus-level validation.
 
-**Bounded follow-up opportunities:** (1) verify exact LFSR feedback/tap behavior against a known input/output trace rather than rely solely on Ghidra's decompiler; (2) verify/rename mapper helper functions and the export-search comparator; (3) compare the five encoded export records and surrounding code across independently acquired DragonsGate/CookUp DLLs, including benign control samples; (4) run the companion YARA against known-positive samples and a clean corpus / VT Retrohunt; (5) preserve original PCAP, Fiddler responses, Ghidra addresses and synthetic test hashes. Further synthetic-buffer tuning has diminishing investigative value until an authentic, server-delivered blob is obtained.
+**Bounded follow-up opportunities (prioritized for Ghidra):** (1) trace the callers of `FUN_1000490B` and the origin of `param_3` passed to preferred exports—this is a concrete, still-unclassified argument in the stage interfaces; (2) inspect `FUN_100039AB` to determine exact registry-value types/semantics in the Defender PUA check; (3) annotate `FUN_1000238E` / `FUN_100023BA` mapping ownership, TLS handling and export resolution, and validate the `FUN_1000227B` fallback rules; (4) trace `FUN_1000280F`'s 41-character configuration-like string **only as far as present call sites permit**—the unavailable later stages determine its actual use; (5) compare matching code blocks, not just encoded string outputs, in the CoolPDF and ClipVault DLLs to document reusable module boundaries. LFSR test-vector validation and independent YARA retrohunt/clean-corpus testing remain valuable secondary tasks. Further synthetic-buffer tuning has diminishing value until an authentic, server-delivered blob is obtained.
 
 Prepared from Ghidra decompilation, Frida 17.7.3 logs, Fiddler sessions and FLARE-VM screenshots, updated 13 November 2026. Synthetic-file probes were isolated, inert test fixtures, not recovered malware payloads. The packaged update does not distribute malware binaries.
